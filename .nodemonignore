@@ -1,0 +1,12 @@
+# Ignorar pastas que mudam frequentemente
+auth/
+logs/
+uploads/
+node_modules/
+.git/
+
+# Ignorar arquivos específicos
+*.log
+*.json
+auth/**/*
+logs/**/*

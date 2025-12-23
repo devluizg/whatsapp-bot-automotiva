@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel Admin - Loja Automotiva</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <!-- ============================================ -->
+    <!-- TELA DE LOGIN -->
+    <!-- ============================================ -->
+    <div id="login-screen" class="login-screen">
+        <div class="login-container">
+            <div class="login-header">
+                <div class="login-logo">
+                    <i class="fas fa-car"></i>
+                </div>
+                <h1>Loja Automotiva</h1>
+                <p>Painel Administrativo</p>
+            </div>
+            
+            <form id="login-form" class="login-form">
+                <div class="form-group">
+                    <label for="login-email">
+                        <i class="fas fa-envelope"></i>
+                        E-mail
+                    </label>
+                    <input 
+                        type="email" 
+                        id="login-email" 
+                        placeholder="seu@email.com"
+                        required
+                    >
+                </div>
+                
+                <div class="form-group">
+                    <label for="login-password">
+                        <i class="fas fa-lock"></i>
+                        Senha
+                    </label>
+                    <input 
+                        type="password" 
+                        id="login-password" 
+                        placeholder="••••••••"
+                        required
+                    >
+                </div>
+                
+                <button type="submit" class="btn btn-primary btn-block">
+                    <i class="fas fa-sign-in-alt"></i>
+                    Entrar
+                </button>
+                
+                <div id="login-error" class="alert alert-error" style="display: none;"></div>
+            </form>
+            
+            <div class="login-footer">
+                <p>Bot WhatsApp com Inteligência Artificial</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- PAINEL PRINCIPAL -->
+    <!-- ============================================ -->
+    <div id="app" class="app-container" style="display: none;">
+        
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <i class="fas fa-car"></i>
+                    <span>Auto<strong>Bot</strong></span>
+                </div>
+                <button class="sidebar-toggle" id="sidebar-toggle">
+                    <i class="fas fa-bars"></i>
+                </button>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <ul>
+                    <li>
+                        <a href="#" data-page="dashboard" class="active">
+                            <i class="fas fa-chart-line"></i>
+                            <span>Dashboard</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" data-page="products">
+                            <i class="fas fa-box"></i>
+                            <span>Produtos</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" data-page="services">
+                            <i class="fas fa-wrench"></i>
+                            <span>Serviços</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" data-page="customers">
+                            <i class="fas fa-users"></i>
+                            <span>Clientes</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" data-page="conversations">
+                            <i class="fas fa-comments"></i>
+                            <span>Conversas</span>
+                            <span class="badge" id="unread-badge" style="display: none;">0</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" data-page="whatsapp">
+                            <i class="fab fa-whatsapp"></i>
+                            <span>WhatsApp</span>
+                            <span class="status-dot" id="whatsapp-status-dot"></span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" data-page="settings">
+                            <i class="fas fa-cog"></i>
+                            <span>Configurações</span>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar">
+                        <i class="fas fa-user"></i>
+                    </div>
+                    <div class="user-details">
+                        <span class="user-name" id="user-name">Admin</span>
+                        <span class="user-role" id="user-role">Administrador</span>
+                    </div>
+                </div>
+                <button class="btn-logout" id="btn-logout" title="Sair">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="main-header">
+                <div class="header-left">
+                    <button class="mobile-menu-toggle" id="mobile-menu-toggle">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h1 class="page-title" id="page-title">Dashboard</h1>
+                </div>
+                
+                <div class="header-right">
+                    <div class="whatsapp-status" id="whatsapp-status">
+                        <i class="fab fa-whatsapp"></i>
+                        <span>Verificando...</span>
+                    </div>
+                    
+                    <div class="header-notifications">
+                        <button class="btn-icon" id="btn-notifications">
+                            <i class="fas fa-bell"></i>
+                            <span class="notification-count" id="notification-count" style="display: none;">0</span>
+                        </button>
+                    </div>
+                    
+                    <div class="header-date">
+                        <i class="fas fa-calendar"></i>
+                        <span id="current-date"></span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Page Content -->
+            <div class="page-content" id="page-content">
+                <!-- Conteúdo dinâmico será carregado aqui -->
+            </div>
+        </main>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- TEMPLATES DAS PÁGINAS -->
+    <!-- ============================================ -->
+    
+    <!-- Template: Dashboard -->
+    <template id="template-dashboard">
+        <div class="dashboard-page">
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon bg-primary">
+                        <i class="fas fa-box"></i>
+                    </div>
+                    <div class="stat-info">
+                        <h3 id="stat-products">0</h3>
+                        <p>Produtos</p>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-icon bg-success">
+                        <i class="fas fa-wrench"></i>
+                    </div>
+                    <div class="stat-info">
+                        <h3 id="stat-services">0</h3>
+                        <p>Serviços</p>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-icon bg-info">
+                        <i class="fas fa-users"></i>
+                    </div>
+                    <div class="stat-info">
+                        <h3 id="stat-customers">0</h3>
+                        <p>Clientes</p>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-icon bg-warning">
+                        <i class="fas fa-comments"></i>
+                    </div>
+                    <div class="stat-info">
+                        <h3 id="stat-conversations">0</h3>
+                        <p>Conversas Hoje</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div class="charts-row">
+                <div class="chart-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-chart-bar"></i> Mensagens por Dia</h3>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="messages-chart"></canvas>
+                    </div>
+                </div>
+                
+                <div class="chart-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-chart-pie"></i> Produtos por Categoria</h3>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="categories-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Activity -->
+            <div class="activity-row">
+                <div class="activity-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-history"></i> Últimas Conversas</h3>
+                        <a href="#" data-page="conversations" class="btn btn-sm btn-outline">Ver todas</a>
+                    </div>
+                    <div class="card-body">
+                        <div class="activity-list" id="recent-conversations">
+                            <div class="loading-placeholder">
+                                <i class="fas fa-spinner fa-spin"></i>
+                                Carregando...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="activity-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-exclamation-triangle"></i> Estoque Baixo</h3>
+                        <a href="#" data-page="products" class="btn btn-sm btn-outline">Ver produtos</a>
+                    </div>
+                    <div class="card-body">
+                        <div class="activity-list" id="low-stock-products">
+                            <div class="loading-placeholder">
+                                <i class="fas fa-spinner fa-spin"></i>
+                                Carregando...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Template: Produtos -->
+    <template id="template-products">
+        <div class="products-page">
+            <!-- Toolbar -->
+            <div class="page-toolbar">
+                <div class="toolbar-left">
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input 
+                            type="text" 
+                            id="products-search" 
+                            placeholder="Buscar produtos..."
+                        >
+                    </div>
+                    
+                    <select id="products-category-filter" class="form-select">
+                        <option value="">Todas as categorias</option>
+                    </select>
+                </div>
+                
+                <div class="toolbar-right">
+                    <button class="btn btn-primary" id="btn-add-product">
+                        <i class="fas fa-plus"></i>
+                        Novo Produto
+                    </button>
+                </div>
+            </div>
+
+            <!-- Products Table -->
+            <div class="table-container">
+                <table class="data-table" id="products-table">
+                    <thead>
+                        <tr>
+                            <th>Código</th>
+                            <th>Produto</th>
+                            <th>Categoria</th>
+                            <th>Preço</th>
+                            <th>Estoque</th>
+                            <th>Status</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody id="products-tbody">
+                        <tr>
+                            <td colspan="7" class="loading-cell">
+                                <i class="fas fa-spinner fa-spin"></i>
+                                Carregando produtos...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            <div class="pagination" id="products-pagination"></div>
+        </div>
+    </template>
+
+    <!-- Template: Serviços -->
+    <template id="template-services">
+        <div class="services-page">
+            <!-- Toolbar -->
+            <div class="page-toolbar">
+                <div class="toolbar-left">
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input 
+                            type="text" 
+                            id="services-search" 
+                            placeholder="Buscar serviços..."
+                        >
+                    </div>
+                </div>
+                
+                <div class="toolbar-right">
+                    <button class="btn btn-primary" id="btn-add-service">
+                        <i class="fas fa-plus"></i>
+                        Novo Serviço
+                    </button>
+                </div>
+            </div>
+
+            <!-- Services Grid -->
+            <div class="services-grid" id="services-grid">
+                <div class="loading-placeholder">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    Carregando serviços...
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Template: Clientes -->
+    <template id="template-customers">
+        <div class="customers-page">
+            <!-- Toolbar -->
+            <div class="page-toolbar">
+                <div class="toolbar-left">
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input 
+                            type="text" 
+                            id="customers-search" 
+                            placeholder="Buscar clientes..."
+                        >
+                    </div>
+                </div>
+                
+                <div class="toolbar-right">
+                    <button class="btn btn-outline" id="btn-export-customers">
+                        <i class="fas fa-download"></i>
+                        Exportar
+                    </button>
+                </div>
+            </div>
+
+            <!-- Customers Table -->
+            <div class="table-container">
+                <table class="data-table" id="customers-table">
+                    <thead>
+                        <tr>
+                            <th>Cliente</th>
+                            <th>Telefone</th>
+                            <th>Última Interação</th>
+                            <th>Total Conversas</th>
+                            <th>Status</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody id="customers-tbody">
+                        <tr>
+                            <td colspan="6" class="loading-cell">
+                                <i class="fas fa-spinner fa-spin"></i>
+                                Carregando clientes...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            <div class="pagination" id="customers-pagination"></div>
+        </div>
+    </template>
+
+    <!-- Template: Conversas -->
+    <template id="template-conversations">
+        <div class="conversations-page">
+            <div class="conversations-container">
+                <!-- Lista de Conversas -->
+                <div class="conversations-list">
+                    <div class="conversations-header">
+                        <h3>Conversas</h3>
+                        <div class="search-box small">
+                            <i class="fas fa-search"></i>
+                            <input 
+                                type="text" 
+                                id="conversations-search" 
+                                placeholder="Buscar..."
+                            >
+                        </div>
+                    </div>
+                    
+                    <div class="conversations-items" id="conversations-items">
+                        <div class="loading-placeholder">
+                            <i class="fas fa-spinner fa-spin"></i>
+                            Carregando...
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Chat -->
+                <div class="chat-container" id="chat-container">
+                    <div class="chat-placeholder">
+                        <i class="fas fa-comments"></i>
+                        <p>Selecione uma conversa para visualizar</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Template: WhatsApp -->
+    <template id="template-whatsapp">
+        <div class="whatsapp-page">
+            <div class="whatsapp-status-card">
+                <div class="status-header">
+                    <div class="status-icon" id="wa-status-icon">
+                        <i class="fab fa-whatsapp"></i>
+                    </div>
+                    <div class="status-info">
+                        <h2 id="wa-status-title">Verificando conexão...</h2>
+                        <p id="wa-status-subtitle">Aguarde um momento</p>
+                    </div>
+                </div>
+
+                <!-- QR Code Container -->
+                <div class="qr-container" id="qr-container" style="display: none;">
+                    <p>Escaneie o QR Code com seu WhatsApp:</p>
+                    <div class="qr-code" id="qr-code"></div>
+                    <p class="qr-instructions">
+                        <i class="fas fa-mobile-alt"></i>
+                        WhatsApp > Menu (⋮) > Aparelhos conectados > Conectar um aparelho
+                    </p>
+                </div>
+
+                <!-- Connected Info -->
+                <div class="connected-info" id="connected-info" style="display: none;">
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <label>Número conectado:</label>
+                            <span id="wa-phone-number">-</span>
+                        </div>
+                        <div class="info-item">
+                            <label>Conectado desde:</label>
+                            <span id="wa-connected-since">-</span>
+                        </div>
+                        <div class="info-item">
+                            <label>Tempo online:</label>
+                            <span id="wa-uptime">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Actions -->
+                <div class="status-actions">
+                    <button class="btn btn-outline" id="btn-wa-restart">
+                        <i class="fas fa-sync"></i>
+                        Reiniciar Conexão
+                    </button>
+                    <button class="btn btn-danger" id="btn-wa-logout" style="display: none;">
+                        <i class="fas fa-sign-out-alt"></i>
+                        Desconectar
+                    </button>
+                </div>
+            </div>
+
+            <!-- Stats -->
+            <div class="whatsapp-stats">
+                <div class="stat-card small">
+                    <i class="fas fa-paper-plane"></i>
+                    <div>
+                        <h4 id="wa-messages-sent">0</h4>
+                        <p>Mensagens Enviadas</p>
+                    </div>
+                </div>
+                <div class="stat-card small">
+                    <i class="fas fa-inbox"></i>
+                    <div>
+                        <h4 id="wa-messages-received">0</h4>
+                        <p>Mensagens Recebidas</p>
+                    </div>
+                </div>
+                <div class="stat-card small">
+                    <i class="fas fa-robot"></i>
+                    <div>
+                        <h4 id="wa-auto-responses">0</h4>
+                        <p>Respostas Automáticas</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Template: Configurações -->
+    <template id="template-settings">
+        <div class="settings-page">
+            <div class="settings-grid">
+                <!-- Informações da Loja -->
+                <div class="settings-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-store"></i> Informações da Loja</h3>
+                    </div>
+                    <div class="card-body">
+                        <form id="store-settings-form">
+                            <div class="form-group">
+                                <label>Nome da Loja</label>
+                                <input type="text" id="store-name" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Telefone</label>
+                                <input type="text" id="store-phone" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Endereço</label>
+                                <textarea id="store-address" class="form-control" rows="2"></textarea>
+                            </div>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Salvar
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Horário de Funcionamento -->
+                <div class="settings-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-clock"></i> Horário de Funcionamento</h3>
+                    </div>
+                    <div class="card-body">
+                        <form id="schedule-settings-form">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Abertura</label>
+                                    <input type="time" id="schedule-start" class="form-control">
+                                </div>
+                                <div class="form-group">
+                                    <label>Fechamento</label>
+                                    <input type="time" id="schedule-end" class="form-control">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Dias de Funcionamento</label>
+                                <div class="checkbox-group">
+                                    <label><input type="checkbox" value="seg"> Seg</label>
+                                    <label><input type="checkbox" value="ter"> Ter</label>
+                                    <label><input type="checkbox" value="qua"> Qua</label>
+                                    <label><input type="checkbox" value="qui"> Qui</label>
+                                    <label><input type="checkbox" value="sex"> Sex</label>
+                                    <label><input type="checkbox" value="sab"> Sáb</label>
+                                    <label><input type="checkbox" value="dom"> Dom</label>
+                                </div>
+                            </div>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Salvar
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Configurações do Bot -->
+                <div class="settings-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-robot"></i> Configurações do Bot</h3>
+                    </div>
+                    <div class="card-body">
+                        <form id="bot-settings-form">
+                            <div class="form-group">
+                                <label>Nome do Bot</label>
+                                <input type="text" id="bot-name" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>Delay de Digitação (ms)</label>
+                                <input type="number" id="bot-typing-delay" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="bot-ai-enabled">
+                                    Habilitar IA (GPT)
+                                </label>
+                            </div>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Salvar
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Minha Conta -->
+                <div class="settings-card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-user"></i> Minha Conta</h3>
+                    </div>
+                    <div class="card-body">
+                        <form id="account-settings-form">
+                            <div class="form-group">
+                                <label>Nome</label>
+                                <input type="text" id="account-name" class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>E-mail</label>
+                                <input type="email" id="account-email" class="form-control" disabled>
+                            </div>
+                            <div class="form-group">
+                                <label>Nova Senha (deixe em branco para manter)</label>
+                                <input type="password" id="account-password" class="form-control">
+                            </div>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Salvar
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ============================================ -->
+    <!-- MODAIS -->
+    <!-- ============================================ -->
+    
+    <!-- Modal de Produto -->
+    <div class="modal" id="product-modal">
+        <div class="modal-overlay"></div>
+        <div class="modal-container">
+            <div class="modal-header">
+                <h3 id="product-modal-title">Novo Produto</h3>
+                <button class="modal-close" data-close-modal>
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="product-form">
+                    <input type="hidden" id="product-id">
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Código *</label>
+                            <input type="text" id="product-code" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Categoria *</label>
+                            <select id="product-category" class="form-control" required>
+                                <option value="">Selecione...</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Nome do Produto *</label>
+                        <input type="text" id="product-name" class="form-control" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Descrição</label>
+                        <textarea id="product-description" class="form-control" rows="3"></textarea>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Preço *</label>
+                            <input type="number" id="product-price" class="form-control" step="0.01" min="0" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Preço Promocional</label>
+                            <input type="number" id="product-sale-price" class="form-control" step="0.01" min="0">
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Quantidade em Estoque *</label>
+                            <input type="number" id="product-stock" class="form-control" min="0" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Estoque Mínimo</label>
+                            <input type="number" id="product-min-stock" class="form-control" min="0">
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Marca</label>
+                        <input type="text" id="product-brand" class="form-control">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Veículos Compatíveis</label>
+                        <input type="text" id="product-vehicles" class="form-control" placeholder="Ex: Gol, Palio, Civic...">
+                        <small>Separe por vírgula</small>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group checkbox-inline">
+                            <label>
+                                <input type="checkbox" id="product-featured">
+                                Produto em Destaque
+                            </label>
+                        </div>
+                        <div class="form-group checkbox-inline">
+                            <label>
+                                <input type="checkbox" id="product-active" checked>
+                                Produto Ativo
+                            </label>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" data-close-modal>Cancelar</button>
+                <button class="btn btn-primary" id="btn-save-product">
+                    <i class="fas fa-save"></i> Salvar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Serviço -->
+    <div class="modal" id="service-modal">
+        <div class="modal-overlay"></div>
+        <div class="modal-container">
+            <div class="modal-header">
+                <h3 id="service-modal-title">Novo Serviço</h3>
+                <button class="modal-close" data-close-modal>
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="service-form">
+                    <input type="hidden" id="service-id">
+                    
+                    <div class="form-group">
+                        <label>Nome do Serviço *</label>
+                        <input type="text" id="service-name" class="form-control" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Descrição</label>
+                        <textarea id="service-description" class="form-control" rows="3"></textarea>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Preço Mínimo *</label>
+                            <input type="number" id="service-price-min" class="form-control" step="0.01" min="0" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Preço Máximo</label>
+                            <input type="number" id="service-price-max" class="form-control" step="0.01" min="0">
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Tempo Estimado</label>
+                        <input type="text" id="service-duration" class="form-control" placeholder="Ex: 2 horas">
+                    </div>
+                    
+                    <div class="form-group checkbox-inline">
+                        <label>
+                            <input type="checkbox" id="service-active" checked>
+                            Serviço Ativo
+                        </label>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" data-close-modal>Cancelar</button>
+                <button class="btn btn-primary" id="btn-save-service">
+                    <i class="fas fa-save"></i> Salvar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Confirmação -->
+    <div class="modal" id="confirm-modal">
+        <div class="modal-overlay"></div>
+        <div class="modal-container modal-sm">
+            <div class="modal-header">
+                <h3 id="confirm-modal-title">Confirmar</h3>
+                <button class="modal-close" data-close-modal>
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-modal-message">Tem certeza que deseja realizar esta ação?</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" data-close-modal>Cancelar</button>
+                <button class="btn btn-danger" id="btn-confirm-action">Confirmar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <!-- ============================================ -->
+    <!-- SCRIPTS -->
+    <!-- ============================================ -->
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- Socket.IO -->
+    <script src="/socket.io/socket.io.js"></script>
+    
+    <!-- QRCode -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    
+    <!-- App Scripts -->
+    <script src="/js/utils.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/auth.js"></script>
+    <script src="/js/dashboard.js"></script>
+    <script src="/js/products.js"></script>
+    <script src="/js/services.js"></script>
+    <script src="/js/customers.js"></script>
+    <script src="/js/conversations.js"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>
