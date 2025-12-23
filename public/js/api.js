@@ -3,6 +3,8 @@
  * API CLIENT
  * Comunicação com o backend
  * ============================================
+ * 
+ * ATUALIZADO: Adicionado endpoint getQR() para WhatsApp
  */
 
 const API = {
@@ -73,8 +75,12 @@ const API = {
         };
 
         // Adiciona body se existir
-        if (options.body && typeof options.body === 'object') {
+        if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
             config.body = JSON.stringify(options.body);
+        } else if (options.body instanceof FormData) {
+            // Remove Content-Type para FormData (o browser define automaticamente)
+            delete config.headers['Content-Type'];
+            config.body = options.body;
         }
 
         try {
@@ -660,7 +666,7 @@ const API = {
     },
 
     // ============================================
-    // WHATSAPP
+    // WHATSAPP - ATUALIZADO
     // ============================================
     
     whatsapp: {
@@ -673,11 +679,29 @@ const API = {
         },
 
         /**
-         * Obtém QR Code
+         * Obtém QR Code (novo endpoint /qr)
+         * Retorna QR Code em base64 pronto para exibir
+         * @returns {Promise<object>}
+         */
+        async getQR() {
+            return API.get('/whatsapp/qr');
+        },
+
+        /**
+         * Obtém QR Code (endpoint antigo /qrcode)
+         * Mantido para compatibilidade
          * @returns {Promise<object>}
          */
         async getQRCode() {
             return API.get('/whatsapp/qrcode');
+        },
+
+        /**
+         * Obtém informações do dispositivo
+         * @returns {Promise<object>}
+         */
+        async getInfo() {
+            return API.get('/whatsapp/info');
         },
 
         /**
@@ -733,6 +757,41 @@ const API = {
         },
 
         /**
+         * Envia mídia
+         * @param {string} phone - Telefone
+         * @param {string} mediaUrl - URL da mídia
+         * @param {string} caption - Legenda
+         * @param {string} type - Tipo (image, video, document, audio)
+         * @returns {Promise<object>}
+         */
+        async sendMedia(phone, mediaUrl, caption = '', type = 'image') {
+            return API.post('/whatsapp/send-media', { phone, mediaUrl, caption, type });
+        },
+
+        /**
+         * Envia localização
+         * @param {string} phone - Telefone
+         * @param {number} latitude - Latitude
+         * @param {number} longitude - Longitude
+         * @param {string} name - Nome do local
+         * @param {string} address - Endereço
+         * @returns {Promise<object>}
+         */
+        async sendLocation(phone, latitude, longitude, name = '', address = '') {
+            return API.post('/whatsapp/send-location', { phone, latitude, longitude, name, address });
+        },
+
+        /**
+         * Envia contato
+         * @param {string} phone - Telefone destino
+         * @param {object} contact - Dados do contato {name, phone}
+         * @returns {Promise<object>}
+         */
+        async sendContact(phone, contact) {
+            return API.post('/whatsapp/send-contact', { phone, contact });
+        },
+
+        /**
          * Verifica se número existe
          * @param {string} phone - Telefone
          * @returns {Promise<object>}
@@ -742,11 +801,117 @@ const API = {
         },
 
         /**
+         * Verifica múltiplos números
+         * @param {array} phones - Lista de telefones
+         * @returns {Promise<object>}
+         */
+        async checkNumbers(phones) {
+            return API.post('/whatsapp/check-numbers', { phones });
+        },
+
+        /**
+         * Obtém perfil de um contato
+         * @param {string} phone - Telefone
+         * @returns {Promise<object>}
+         */
+        async getProfile(phone) {
+            return API.get(`/whatsapp/profile/${phone}`);
+        },
+
+        /**
+         * Obtém foto de perfil de um contato
+         * @param {string} phone - Telefone
+         * @returns {Promise<object>}
+         */
+        async getProfilePicture(phone) {
+            return API.get(`/whatsapp/profile-picture/${phone}`);
+        },
+
+        /**
          * Obtém estatísticas
          * @returns {Promise<object>}
          */
         async getStats() {
             return API.get('/whatsapp/stats');
+        },
+
+        /**
+         * Obtém estatísticas de mensagens
+         * @param {string} period - Período (today, week, month)
+         * @returns {Promise<object>}
+         */
+        async getMessageStats(period = 'today') {
+            return API.get('/whatsapp/stats/messages', { period });
+        },
+
+        /**
+         * Lista grupos
+         * @returns {Promise<object>}
+         */
+        async getGroups() {
+            return API.get('/whatsapp/groups');
+        },
+
+        /**
+         * Obtém informações de um grupo
+         * @param {string} groupId - ID do grupo
+         * @returns {Promise<object>}
+         */
+        async getGroupInfo(groupId) {
+            return API.get(`/whatsapp/groups/${groupId}`);
+        },
+
+        /**
+         * Lista templates de mensagem
+         * @returns {Promise<object>}
+         */
+        async getTemplates() {
+            return API.get('/whatsapp/templates');
+        },
+
+        /**
+         * Cria template de mensagem
+         * @param {object} data - Dados do template
+         * @returns {Promise<object>}
+         */
+        async createTemplate(data) {
+            return API.post('/whatsapp/templates', data);
+        },
+
+        /**
+         * Atualiza template de mensagem
+         * @param {number} id - ID do template
+         * @param {object} data - Dados a atualizar
+         * @returns {Promise<object>}
+         */
+        async updateTemplate(id, data) {
+            return API.put(`/whatsapp/templates/${id}`, data);
+        },
+
+        /**
+         * Remove template de mensagem
+         * @param {number} id - ID do template
+         * @returns {Promise<object>}
+         */
+        async deleteTemplate(id) {
+            return API.delete(`/whatsapp/templates/${id}`);
+        },
+
+        /**
+         * Obtém configurações do WhatsApp
+         * @returns {Promise<object>}
+         */
+        async getConfig() {
+            return API.get('/whatsapp/config');
+        },
+
+        /**
+         * Atualiza configurações do WhatsApp
+         * @param {object} data - Dados de configuração
+         * @returns {Promise<object>}
+         */
+        async updateConfig(data) {
+            return API.put('/whatsapp/config', data);
         }
     },
 
@@ -840,7 +1005,6 @@ const API = {
 
             return API.request('/import/products', {
                 method: 'POST',
-                headers: {}, // Remove Content-Type para FormData
                 body: formData
             });
         },
@@ -856,7 +1020,6 @@ const API = {
 
             return API.request('/import/services', {
                 method: 'POST',
-                headers: {},
                 body: formData
             });
         },
