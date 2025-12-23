@@ -5,7 +5,101 @@
  * 
  * Arquivo principal de inicialização.
  * Conecta todos os módulos e inicia o bot.
+ * 
+ * IMPORTANTE: O polyfill de crypto DEVE ser
+ * a primeira coisa a executar no arquivo!
  */
+
+// ============================================
+// POLYFILL CRYPTO - PRIMEIRA COISA!
+// ============================================
+// Necessário para Railway e outros ambientes
+// de produção onde globalThis.crypto não existe
+// ============================================
+
+const cryptoNode = require('crypto');
+
+console.log('\n');
+console.log('╔══════════════════════════════════════════════════════════════╗');
+console.log('║          INICIALIZANDO POLYFILL DE CRYPTO                    ║');
+console.log('╚══════════════════════════════════════════════════════════════╝');
+console.log('');
+
+// Verifica e aplica polyfill para globalThis.crypto
+if (typeof globalThis.crypto === 'undefined') {
+    console.log('🔐 [CRYPTO] globalThis.crypto não definido, aplicando polyfill...');
+    
+    // Para Node.js 16+, preferir webcrypto
+    if (cryptoNode.webcrypto) {
+        globalThis.crypto = cryptoNode.webcrypto;
+        console.log('   ├─ ✅ Usando crypto.webcrypto (Node.js 16+)');
+    } else {
+        // Fallback para versões mais antigas do Node.js
+        globalThis.crypto = {
+            getRandomValues: (buffer) => {
+                return cryptoNode.randomFillSync(buffer);
+            },
+            randomUUID: () => {
+                if (cryptoNode.randomUUID) {
+                    return cryptoNode.randomUUID();
+                }
+                // Fallback manual para randomUUID
+                return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+                    (c ^ cryptoNode.randomBytes(1)[0] & 15 >> c / 4).toString(16)
+                );
+            },
+            subtle: cryptoNode.subtle || null,
+        };
+        console.log('   ├─ ✅ Usando polyfill customizado');
+    }
+} else {
+    console.log('🔐 [CRYPTO] globalThis.crypto já existe');
+}
+
+// Polyfill para global.crypto (compatibilidade adicional)
+if (typeof global.crypto === 'undefined') {
+    global.crypto = globalThis.crypto;
+    console.log('🔐 [CRYPTO] global.crypto definido via polyfill');
+} else {
+    console.log('🔐 [CRYPTO] global.crypto já existe');
+}
+
+// Log de verificação final
+console.log('');
+console.log('🔐 [CRYPTO] Status final:');
+console.log('   ├─ globalThis.crypto:', typeof globalThis.crypto !== 'undefined' ? '✅ Definido' : '❌ Indefinido');
+console.log('   ├─ global.crypto:', typeof global.crypto !== 'undefined' ? '✅ Definido' : '❌ Indefinido');
+console.log('   ├─ getRandomValues:', typeof globalThis.crypto?.getRandomValues === 'function' ? '✅ Disponível' : '❌ Indisponível');
+console.log('   ├─ randomUUID:', typeof globalThis.crypto?.randomUUID === 'function' ? '✅ Disponível' : '❌ Indisponível');
+console.log('   ├─ subtle:', globalThis.crypto?.subtle ? '✅ Disponível' : '⚠️ Indisponível (pode não ser necessário)');
+console.log('   └─ Node.js version:', process.version);
+console.log('');
+
+// Teste rápido do crypto
+try {
+    const testBuffer = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(testBuffer);
+    console.log('🔐 [CRYPTO] Teste getRandomValues: ✅ Funcionando');
+    
+    if (globalThis.crypto.randomUUID) {
+        const testUUID = globalThis.crypto.randomUUID();
+        console.log('🔐 [CRYPTO] Teste randomUUID: ✅ Funcionando -', testUUID);
+    }
+    
+    console.log('');
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('   ✅ POLYFILL DE CRYPTO APLICADO COM SUCESSO!');
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('');
+} catch (cryptoTestError) {
+    console.error('🔐 [CRYPTO] ❌ ERRO no teste do crypto:', cryptoTestError.message);
+    console.error('   O bot pode não funcionar corretamente!');
+    console.log('');
+}
+
+// ============================================
+// IMPORTS (DEPOIS DO POLYFILL!)
+// ============================================
 
 require('dotenv').config();
 
@@ -50,6 +144,7 @@ function showConfig() {
     logger.info(`📅 Dias: ${settings.schedule.workDays.join(', ')}`);
     logger.info(`🧠 IA: ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ⚠️'}`);
     logger.info(`🌐 Servidor Web: ${process.env.START_WEB_SERVER === 'true' ? 'Habilitado' : 'Desabilitado'}`);
+    logger.info(`🔐 Crypto: ${typeof globalThis.crypto !== 'undefined' ? 'Polyfill ativo ✅' : 'Nativo ✅'}`);
     logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 }
 
@@ -308,10 +403,24 @@ function checkRequirements() {
     const nodeVersion = process.versions.node;
     const majorVersion = parseInt(nodeVersion.split('.')[0]);
 
-    if (majorVersion < 18) {
+    logger.info(`📋 Node.js versão: ${nodeVersion}`);
+
+    if (majorVersion < 16) {
         logger.error(`❌ Node.js versão ${nodeVersion} não suportada.`);
-        logger.error('   Versão mínima requerida: 18.0.0');
+        logger.error('   Versão mínima requerida: 16.0.0');
+        logger.error('   Recomendado: 18.0.0 ou superior');
         logger.error('   Atualize o Node.js: https://nodejs.org/');
+        return false;
+    }
+
+    if (majorVersion < 18) {
+        logger.warn(`⚠️  Node.js ${nodeVersion} - Recomendado atualizar para 18+`);
+    }
+
+    // Verifica se crypto está funcionando
+    if (typeof globalThis.crypto === 'undefined') {
+        logger.error('❌ Crypto não está disponível!');
+        logger.error('   O polyfill falhou. Verifique a configuração.');
         return false;
     }
 
@@ -376,9 +485,9 @@ async function main() {
 
         // Exibe instruções
         logger.info('');
-        logger.info('═══════════════════════════════════════════════════════');
+        logger.info('═══════════════════════════════════════════════════════════');
         logger.info('  🎉 BOT INICIADO COM SUCESSO!');
-        logger.info('═══════════════════════════════════════════════════════');
+        logger.info('═══════════════════════════════════════════════════════════');
         logger.info('');
         logger.info('📱 Escaneie o QR Code acima com seu WhatsApp');
         logger.info('   (se ainda não estiver conectado)');
