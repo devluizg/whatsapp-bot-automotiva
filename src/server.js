@@ -5,6 +5,11 @@
  * 
  * Servidor Express com APIs REST e Socket.IO
  * para o painel administrativo da loja.
+ * 
+ * CORREÇÕES PARA RAILWAY:
+ * - Usa PORT do Railway (não SERVER_PORT)
+ * - Escuta em 0.0.0.0 (não localhost)
+ * - Logs detalhados de inicialização
  */
 
 require('dotenv').config();
@@ -16,6 +21,7 @@ const rateLimit = require('express-rate-limit');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 const logger = require('./utils/logger');
 const db = require('./database/connection');
@@ -31,9 +37,30 @@ const settingsRoutes = require('./routes/settings');
 const importRoutes = require('./routes/import');
 const whatsappRoutes = require('./routes/whatsapp');
 
-// Configurações
-const PORT = process.env.SERVER_PORT || 3000;
-const HOST = process.env.SERVER_HOST || 'localhost';
+// ============================================
+// CONFIGURAÇÕES - CORRIGIDO PARA RAILWAY
+// ============================================
+
+// Railway usa a variável PORT automaticamente
+// Fallback para SERVER_PORT ou 3000
+const PORT = process.env.PORT || process.env.SERVER_PORT || 3000;
+
+// IMPORTANTE: Railway requer 0.0.0.0, não localhost!
+const HOST = process.env.HOST || '0.0.0.0';
+
+console.log('\n');
+console.log('╔══════════════════════════════════════════════════════════════╗');
+console.log('║          SERVIDOR WEB - CONFIGURAÇÃO                         ║');
+console.log('╚══════════════════════════════════════════════════════════════╝');
+console.log('');
+console.log('🔧 [SERVER] Configurações:');
+console.log('   ├─ PORT:', PORT);
+console.log('   ├─ HOST:', HOST);
+console.log('   ├─ NODE_ENV:', process.env.NODE_ENV || 'development');
+console.log('   ├─ process.env.PORT:', process.env.PORT || '(não definido)');
+console.log('   ├─ process.env.SERVER_PORT:', process.env.SERVER_PORT || '(não definido)');
+console.log('   └─ process.env.HOST:', process.env.HOST || '(não definido, usando 0.0.0.0)');
+console.log('');
 
 // Instâncias
 const app = express();
@@ -50,23 +77,26 @@ const io = new Server(httpServer, {
 // MIDDLEWARES GLOBAIS
 // ============================================
 
-// Segurança
+// Segurança - Configurado para funcionar com Railway
 app.use(helmet({
-    contentSecurityPolicy: false, // Desabilita para permitir inline scripts no frontend
+    contentSecurityPolicy: false,
     crossOriginEmbedderPolicy: false
 }));
 
-// CORS
+// CORS - Permite todas as origens em produção para funcionar com Railway
 app.use(cors({
-    origin: process.env.FRONTEND_URL || '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    origin: process.env.NODE_ENV === 'production' ? true : (process.env.FRONTEND_URL || '*'),
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
 }));
 
+// Trust proxy - Necessário para Railway
+app.set('trust proxy', 1);
+
 // Rate Limiting
 const limiter = rateLimit({
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutos
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
     max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
     message: {
         success: false,
@@ -83,8 +113,17 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Servir arquivos estáticos (frontend)
-app.use(express.static(path.join(__dirname, '../public')));
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+const publicPath = path.join(__dirname, '../public');
+const uploadsPath = path.join(__dirname, '../uploads');
+
+console.log('📁 [SERVER] Caminhos:');
+console.log('   ├─ Public:', publicPath);
+console.log('   ├─ Uploads:', uploadsPath);
+console.log('   └─ __dirname:', __dirname);
+console.log('');
+
+app.use(express.static(publicPath));
+app.use('/uploads', express.static(uploadsPath));
 
 // Disponibiliza io para as rotas
 app.set('io', io);
@@ -97,6 +136,11 @@ app.use((req, res, next) => {
         const duration = Date.now() - start;
         const logLevel = res.statusCode >= 400 ? 'warn' : 'debug';
         
+        // Log mais visível para debug
+        if (res.statusCode >= 400 || process.env.DEBUG_REQUESTS === 'true') {
+            console.log(`📨 ${req.method} ${req.path} → ${res.statusCode} (${duration}ms)`);
+        }
+        
         logger[logLevel](`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
     });
     
@@ -107,15 +151,23 @@ app.use((req, res, next) => {
 // ROTAS DA API
 // ============================================
 
-// Health check
+// Health check - IMPORTANTE para Railway verificar se está online
 app.get('/api/health', async (req, res) => {
     try {
-        const dbConnected = await db.isConnected();
+        let dbConnected = false;
+        try {
+            dbConnected = await db.isConnected();
+        } catch (e) {
+            console.log('⚠️ [HEALTH] Erro ao verificar DB:', e.message);
+        }
         
         res.json({
             success: true,
             status: 'online',
             timestamp: new Date().toISOString(),
+            environment: process.env.NODE_ENV || 'development',
+            port: PORT,
+            host: HOST,
             services: {
                 database: dbConnected ? 'connected' : 'disconnected',
                 server: 'running'
@@ -128,6 +180,17 @@ app.get('/api/health', async (req, res) => {
             message: error.message
         });
     }
+});
+
+// Rota raiz - responde antes das rotas de API
+app.get('/', (req, res, next) => {
+    // Se existir index.html, serve ele
+    const indexPath = path.join(publicPath, 'index.html');
+    if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
+    }
+    // Senão, serve o HTML padrão
+    res.send(getDefaultHtml());
 });
 
 // Rotas da API
@@ -152,7 +215,13 @@ app.get('*', (req, res) => {
     }
     
     // Senão, serve o frontend
-    res.sendFile(path.join(__dirname, '../public/index.html'));
+    const indexPath = path.join(publicPath, 'index.html');
+    if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
+    }
+    
+    // Fallback para HTML padrão
+    res.send(getDefaultHtml());
 });
 
 // ============================================
@@ -169,10 +238,9 @@ app.use('/api/*', (req, res) => {
 
 // Erro global
 app.use((err, req, res, next) => {
-    logger.error('Erro no servidor:', err.message);
-    logger.error(err.stack);
+    console.error('❌ [ERROR] Erro no servidor:', err.message);
+    console.error(err.stack);
 
-    // Erro de validação do Multer
     if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({
             success: false,
@@ -180,7 +248,6 @@ app.use((err, req, res, next) => {
         });
     }
 
-    // Erro de JSON inválido
     if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
         return res.status(400).json({
             success: false,
@@ -200,24 +267,19 @@ app.use((err, req, res, next) => {
 // SOCKET.IO - COMUNICAÇÃO EM TEMPO REAL
 // ============================================
 
-// Armazena conexões de admins
 const adminSockets = new Map();
 
 io.on('connection', (socket) => {
-    logger.debug(`Socket conectado: ${socket.id}`);
+    console.log(`🔌 [SOCKET] Conectado: ${socket.id}`);
 
-    // Admin se identifica
     socket.on('admin:join', (data) => {
         const { userId, userName } = data;
         adminSockets.set(socket.id, { userId, userName, socket });
         socket.join('admins');
-        logger.info(`Admin conectado: ${userName} (${socket.id})`);
-        
-        // Notifica outros admins
+        console.log(`👤 [SOCKET] Admin conectado: ${userName} (${socket.id})`);
         socket.to('admins').emit('admin:online', { userId, userName });
     });
 
-    // Admin solicita lista de admins online
     socket.on('admin:list', () => {
         const onlineAdmins = [];
         adminSockets.forEach((admin) => {
@@ -229,7 +291,6 @@ io.on('connection', (socket) => {
         socket.emit('admin:list', onlineAdmins);
     });
 
-    // Admin envia mensagem para cliente WhatsApp
     socket.on('whatsapp:send', async (data) => {
         const { phone, message } = data;
         
@@ -237,35 +298,28 @@ io.on('connection', (socket) => {
             const whatsappService = require('./services/whatsappService');
             await whatsappService.sendMessage(phone, message);
             
-            // Salva mensagem no histórico
             const customerService = require('./services/customerService');
             await customerService.saveMessage(phone, message, 'saida', 'humano');
             
             socket.emit('whatsapp:sent', { success: true, phone, message });
-            
-            // Notifica outros admins
             socket.to('admins').emit('conversation:update', { phone, message, type: 'sent' });
         } catch (error) {
             socket.emit('whatsapp:error', { phone, error: error.message });
         }
     });
 
-    // Admin assume atendimento
     socket.on('attendance:start', async (data) => {
         const { phone, userId, userName } = data;
         
         try {
             const customerService = require('./services/customerService');
             await customerService.startAttendance(phone, userId, userName);
-            
-            // Notifica todos os admins
             io.to('admins').emit('attendance:started', { phone, userId, userName });
         } catch (error) {
             socket.emit('attendance:error', { error: error.message });
         }
     });
 
-    // Admin finaliza atendimento
     socket.on('attendance:finish', async (data) => {
         const { phone, observacoes } = data;
         
@@ -273,31 +327,28 @@ io.on('connection', (socket) => {
             const customerService = require('./services/customerService');
             await customerService.finishAttendance(phone, observacoes);
             
-            // Notifica cliente
             const whatsappService = require('./services/whatsappService');
             await whatsappService.sendMessage(phone, 
                 '✅ *Atendimento finalizado*\n\nObrigado pelo contato! Se precisar de algo mais, é só chamar. 😊'
             );
             
-            // Notifica admins
             io.to('admins').emit('attendance:finished', { phone });
         } catch (error) {
             socket.emit('attendance:error', { error: error.message });
         }
     });
 
-    // Desconexão
     socket.on('disconnect', () => {
         const admin = adminSockets.get(socket.id);
         if (admin) {
-            logger.info(`Admin desconectado: ${admin.userName}`);
+            console.log(`👤 [SOCKET] Admin desconectado: ${admin.userName}`);
             socket.to('admins').emit('admin:offline', { 
                 userId: admin.userId, 
                 userName: admin.userName 
             });
             adminSockets.delete(socket.id);
         }
-        logger.debug(`Socket desconectado: ${socket.id}`);
+        console.log(`🔌 [SOCKET] Desconectado: ${socket.id}`);
     });
 });
 
@@ -305,12 +356,6 @@ io.on('connection', (socket) => {
 // FUNÇÕES DE NOTIFICAÇÃO
 // ============================================
 
-/**
- * Notifica admins sobre nova mensagem
- * @param {string} phone - Telefone do cliente
- * @param {string} message - Mensagem recebida
- * @param {object} customer - Dados do cliente
- */
 function notifyNewMessage(phone, message, customer = null) {
     io.to('admins').emit('message:new', {
         phone,
@@ -320,18 +365,10 @@ function notifyNewMessage(phone, message, customer = null) {
     });
 }
 
-/**
- * Notifica admins sobre novo cliente na fila
- * @param {object} attendance - Dados do atendimento
- */
 function notifyNewAttendance(attendance) {
     io.to('admins').emit('attendance:new', attendance);
 }
 
-/**
- * Notifica admins sobre alerta de estoque baixo
- * @param {array} products - Produtos com estoque baixo
- */
 function notifyLowStock(products) {
     io.to('admins').emit('stock:low', {
         count: products.length,
@@ -339,16 +376,10 @@ function notifyLowStock(products) {
     });
 }
 
-/**
- * Notifica sobre mudança de status do WhatsApp
- * @param {string} status - Status da conexão
- * @param {object} data - Dados adicionais
- */
 function notifyWhatsAppStatus(status, data = {}) {
     io.to('admins').emit('whatsapp:status', { status, ...data });
 }
 
-// Exporta funções de notificação para uso em outros módulos
 const notifications = {
     newMessage: notifyNewMessage,
     newAttendance: notifyNewAttendance,
@@ -360,82 +391,100 @@ const notifications = {
 // INICIALIZAÇÃO DO SERVIDOR
 // ============================================
 
-/**
- * Inicia o servidor
- * @returns {object} Instância do servidor HTTP
- */
 async function startServer() {
+    console.log('\n');
+    console.log('╔══════════════════════════════════════════════════════════════╗');
+    console.log('║          INICIANDO SERVIDOR WEB                              ║');
+    console.log('╚══════════════════════════════════════════════════════════════╝');
+    console.log('');
+
     try {
         // Inicializa banco de dados
+        console.log('🗄️  [SERVER] Conectando ao banco de dados...');
         await db.initPool();
-        logger.info('✅ Banco de dados conectado');
+        console.log('✅ [SERVER] Banco de dados conectado');
 
         // Cria diretórios necessários
-        const fs = require('fs');
         const dirs = ['uploads', 'public', 'logs'];
         for (const dir of dirs) {
             const dirPath = path.join(__dirname, '..', dir);
             if (!fs.existsSync(dirPath)) {
                 fs.mkdirSync(dirPath, { recursive: true });
-                logger.info(`📁 Diretório criado: ${dir}`);
+                console.log(`📁 [SERVER] Diretório criado: ${dir}`);
             }
         }
 
-        // Cria arquivo index.html básico se não existir
+        // Verifica/cria index.html
         const indexPath = path.join(__dirname, '../public/index.html');
+        console.log('📄 [SERVER] Verificando index.html:', indexPath);
+        console.log('   └─ Existe:', fs.existsSync(indexPath));
+        
         if (!fs.existsSync(indexPath)) {
             fs.writeFileSync(indexPath, getDefaultHtml());
-            logger.info('📄 index.html padrão criado');
+            console.log('📄 [SERVER] index.html padrão criado');
         }
 
-        // Inicia servidor
+        // Inicia servidor - CORREÇÃO PRINCIPAL AQUI
         return new Promise((resolve, reject) => {
             httpServer.listen(PORT, HOST, () => {
+                console.log('');
+                console.log('╔══════════════════════════════════════════════════════════════╗');
+                console.log('║          ✅ SERVIDOR INICIADO COM SUCESSO!                   ║');
+                console.log('╚══════════════════════════════════════════════════════════════╝');
+                console.log('');
+                console.log(`🚀 [SERVER] Servidor rodando em http://${HOST}:${PORT}`);
+                console.log(`🌐 [SERVER] URL externa: Verificar domínio no Railway`);
+                console.log(`📡 [SERVER] Socket.IO disponível`);
+                console.log(`📁 [SERVER] Frontend servido de /public`);
+                console.log('');
+                
+                // Log para Railway
                 logger.info(`🚀 Servidor rodando em http://${HOST}:${PORT}`);
-                logger.info(`📡 Socket.IO disponível`);
-                logger.info(`📁 Frontend servido de /public`);
+                
                 resolve(httpServer);
             });
 
             httpServer.on('error', (error) => {
+                console.error('');
+                console.error('╔══════════════════════════════════════════════════════════════╗');
+                console.error('║          ❌ ERRO AO INICIAR SERVIDOR                         ║');
+                console.error('╚══════════════════════════════════════════════════════════════╝');
+                console.error('');
+                
                 if (error.code === 'EADDRINUSE') {
-                    logger.error(`❌ Porta ${PORT} já está em uso`);
+                    console.error(`❌ [SERVER] Porta ${PORT} já está em uso`);
+                } else if (error.code === 'EACCES') {
+                    console.error(`❌ [SERVER] Sem permissão para usar porta ${PORT}`);
                 } else {
-                    logger.error('❌ Erro ao iniciar servidor:', error.message);
+                    console.error('❌ [SERVER] Erro:', error.message);
                 }
+                
+                logger.error('❌ Erro ao iniciar servidor:', error.message);
                 reject(error);
             });
         });
     } catch (error) {
+        console.error('❌ [SERVER] Erro na inicialização:', error.message);
+        console.error(error.stack);
         logger.error('❌ Erro na inicialização do servidor:', error.message);
         throw error;
     }
 }
 
-/**
- * Para o servidor
- */
 async function stopServer() {
     return new Promise((resolve) => {
         httpServer.close(() => {
+            console.log('🛑 [SERVER] Servidor encerrado');
             logger.info('🛑 Servidor encerrado');
             resolve();
         });
     });
 }
 
-/**
- * Retorna instância do Socket.IO
- * @returns {object} Instância do Socket.IO
- */
 function getIO() {
     return io;
 }
 
-/**
- * Retorna HTML padrão do frontend
- * @returns {string} HTML
- */
 function getDefaultHtml() {
     return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -444,11 +493,7 @@ function getDefaultHtml() {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Painel Admin - Loja Automotiva</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
@@ -464,21 +509,12 @@ function getDefaultHtml() {
             background: rgba(255,255,255,0.1);
             border-radius: 20px;
             backdrop-filter: blur(10px);
-            max-width: 500px;
+            max-width: 600px;
+            margin: 20px;
         }
-        h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        .emoji {
-            font-size: 4em;
-            margin-bottom: 20px;
-        }
-        p {
-            color: rgba(255,255,255,0.8);
-            margin-bottom: 30px;
-            line-height: 1.6;
-        }
+        h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .emoji { font-size: 4em; margin-bottom: 20px; }
+        p { color: rgba(255,255,255,0.8); margin-bottom: 20px; line-height: 1.6; }
         .status {
             display: inline-block;
             padding: 10px 20px;
@@ -487,6 +523,11 @@ function getDefaultHtml() {
             border-radius: 50px;
             font-weight: bold;
             margin-bottom: 20px;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
         }
         .info {
             background: rgba(255,255,255,0.1);
@@ -494,27 +535,40 @@ function getDefaultHtml() {
             border-radius: 10px;
             text-align: left;
             font-size: 0.9em;
+            margin-top: 20px;
         }
-        .info h3 {
-            margin-bottom: 10px;
-            color: #00d26a;
-        }
-        .info ul {
-            list-style: none;
-        }
+        .info h3 { margin-bottom: 15px; color: #00d26a; }
+        .info ul { list-style: none; }
         .info li {
-            padding: 5px 0;
+            padding: 8px 0;
             border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            justify-content: space-between;
         }
-        .info li:last-child {
-            border-bottom: none;
+        .info li:last-child { border-bottom: none; }
+        a { color: #00d26a; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .method {
+            background: rgba(0,210,106,0.2);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: bold;
         }
-        a {
-            color: #00d26a;
-            text-decoration: none;
+        .get { background: rgba(0,210,106,0.2); color: #00d26a; }
+        .post { background: rgba(255,193,7,0.2); color: #ffc107; }
+        .env-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 10px;
+            font-size: 0.8em;
+            text-align: left;
         }
-        a:hover {
-            text-decoration: underline;
+        .env-info code {
+            background: rgba(255,255,255,0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
         }
     </style>
 </head>
@@ -526,20 +580,50 @@ function getDefaultHtml() {
         <div class="status">✅ Servidor Online</div>
         
         <div class="info">
-            <h3>📡 API Endpoints</h3>
+            <h3>📡 API Endpoints Disponíveis</h3>
             <ul>
-                <li><strong>GET</strong> <a href="/api/health">/api/health</a> - Status do servidor</li>
-                <li><strong>POST</strong> /api/auth/login - Autenticação</li>
-                <li><strong>GET</strong> /api/dashboard/stats - Estatísticas</li>
-                <li><strong>GET</strong> /api/products - Listar produtos</li>
-                <li><strong>GET</strong> /api/services - Listar serviços</li>
-                <li><strong>GET</strong> /api/customers - Listar clientes</li>
+                <li>
+                    <span><span class="method get">GET</span> <a href="/api/health">/api/health</a></span>
+                    <span>Status do servidor</span>
+                </li>
+                <li>
+                    <span><span class="method post">POST</span> /api/auth/login</span>
+                    <span>Autenticação</span>
+                </li>
+                <li>
+                    <span><span class="method get">GET</span> /api/dashboard/stats</span>
+                    <span>Estatísticas</span>
+                </li>
+                <li>
+                    <span><span class="method get">GET</span> /api/products</span>
+                    <span>Listar produtos</span>
+                </li>
+                <li>
+                    <span><span class="method get">GET</span> /api/services</span>
+                    <span>Listar serviços</span>
+                </li>
+                <li>
+                    <span><span class="method get">GET</span> /api/customers</span>
+                    <span>Listar clientes</span>
+                </li>
+                <li>
+                    <span><span class="method get">GET</span> /api/whatsapp/status</span>
+                    <span>Status WhatsApp</span>
+                </li>
             </ul>
         </div>
         
+        <div class="env-info">
+            <strong>🔧 Informações do Servidor:</strong><br><br>
+            • Ambiente: <code>${process.env.NODE_ENV || 'development'}</code><br>
+            • Porta: <code>${PORT}</code><br>
+            • Host: <code>${HOST}</code><br>
+            • Node: <code>${process.version}</code>
+        </div>
+        
         <p style="margin-top: 20px; font-size: 0.8em; opacity: 0.7;">
-            Frontend completo em desenvolvimento...<br>
-            Por enquanto, use a API diretamente.
+            O frontend completo deve estar na pasta <code>/public</code><br>
+            Se você está vendo esta página, coloque seus arquivos HTML/CSS/JS lá.
         </p>
     </div>
 </body>
@@ -550,20 +634,18 @@ function getDefaultHtml() {
 // EXECUÇÃO STANDALONE
 // ============================================
 
-// Se executado diretamente (não importado)
 if (require.main === module) {
     startServer()
         .then(() => {
-            logger.info('✅ Servidor iniciado em modo standalone');
+            console.log('✅ [SERVER] Servidor iniciado em modo standalone');
         })
         .catch((error) => {
-            logger.error('❌ Falha ao iniciar servidor:', error.message);
+            console.error('❌ [SERVER] Falha ao iniciar servidor:', error.message);
             process.exit(1);
         });
 
-    // Graceful shutdown
     process.on('SIGINT', async () => {
-        logger.info('Encerrando servidor...');
+        console.log('\n🛑 [SERVER] Encerrando servidor...');
         await stopServer();
         await db.closePool();
         process.exit(0);
