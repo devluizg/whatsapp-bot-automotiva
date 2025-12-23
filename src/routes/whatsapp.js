@@ -5,10 +5,13 @@
  * 
  * Endpoints para gerenciamento da conexão WhatsApp,
  * envio de mensagens e status da conexão.
+ * 
+ * ATUALIZADO: Adicionado suporte a QR Code em base64
  */
 
 const express = require('express');
 const router = express.Router();
+const QRCode = require('qrcode');
 
 const whatsappService = require('../services/whatsappService');
 const customerService = require('../services/customerService');
@@ -26,6 +29,23 @@ const { authMiddleware, managerMiddleware, auditMiddleware } = require('../middl
 router.get('/status', authMiddleware, async (req, res) => {
     try {
         const status = await whatsappService.getConnectionStatus();
+        
+        // Se não está conectado e tem QR Code, converte para base64
+        let qrCodeBase64 = null;
+        if (!status.connected && status.qrCode) {
+            try {
+                qrCodeBase64 = await QRCode.toDataURL(status.qrCode, {
+                    width: 300,
+                    margin: 2,
+                    color: {
+                        dark: '#000000',
+                        light: '#ffffff'
+                    }
+                });
+            } catch (qrError) {
+                logger.error('Erro ao gerar QR Code base64:', qrError.message);
+            }
+        }
 
         res.json({
             success: true,
@@ -35,9 +55,12 @@ router.get('/status', authMiddleware, async (req, res) => {
                 phoneNumber: status.phoneNumber || null,
                 lastConnected: status.lastConnected || null,
                 uptime: status.uptime || null,
-                qrCode: status.qrCode || null,
+                qrCode: qrCodeBase64,  // Agora em base64
+                qrCodeRaw: status.qrCode || null,  // String original
                 batteryLevel: status.batteryLevel || null,
-                isCharging: status.isCharging || null
+                isCharging: status.isCharging || null,
+                retryCount: status.retryCount || 0,
+                lastError: status.lastError || null
             }
         });
 
@@ -51,8 +74,70 @@ router.get('/status', authMiddleware, async (req, res) => {
 });
 
 /**
+ * GET /api/whatsapp/qr
+ * Retorna QR Code para autenticação (em base64)
+ */
+router.get('/qr', authMiddleware, async (req, res) => {
+    try {
+        const status = await whatsappService.getConnectionStatus();
+        
+        if (status.connected) {
+            return res.json({
+                success: true,
+                data: {
+                    available: false,
+                    message: 'WhatsApp já está conectado',
+                    connected: true
+                }
+            });
+        }
+
+        const qrCode = await whatsappService.getQRCode();
+
+        if (!qrCode) {
+            return res.json({
+                success: true,
+                data: {
+                    available: false,
+                    message: 'QR Code não disponível. Aguarde ou reinicie a conexão.',
+                    connected: false
+                }
+            });
+        }
+
+        // Converte para base64
+        const qrCodeBase64 = await QRCode.toDataURL(qrCode, {
+            width: 300,
+            margin: 2,
+            color: {
+                dark: '#000000',
+                light: '#ffffff'
+            }
+        });
+
+        res.json({
+            success: true,
+            data: {
+                available: true,
+                qrCode: qrCodeBase64,
+                qrCodeRaw: qrCode,
+                expiresIn: 60,
+                message: 'Escaneie o QR Code com seu WhatsApp'
+            }
+        });
+
+    } catch (error) {
+        logger.error('Erro ao obter QR Code:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Erro ao obter QR Code'
+        });
+    }
+});
+
+/**
  * GET /api/whatsapp/qrcode
- * Retorna QR Code para autenticação
+ * Retorna QR Code para autenticação (mantido para compatibilidade)
  */
 router.get('/qrcode', authMiddleware, async (req, res) => {
     try {
@@ -65,11 +150,18 @@ router.get('/qrcode', authMiddleware, async (req, res) => {
             });
         }
 
+        // Converte para base64
+        const qrCodeBase64 = await QRCode.toDataURL(qrCode, {
+            width: 300,
+            margin: 2
+        });
+
         res.json({
             success: true,
             data: {
-                qrCode,
-                expiresIn: 60, // segundos
+                qrCode: qrCodeBase64,
+                qrCodeRaw: qrCode,
+                expiresIn: 60,
                 message: 'Escaneie o QR Code com seu WhatsApp'
             }
         });
