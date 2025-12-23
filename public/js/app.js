@@ -3,6 +3,12 @@
  * APP PRINCIPAL
  * Inicialização e controle geral da aplicação
  * ============================================
+ * 
+ * ATUALIZADO: Melhorias no sistema de QR Code
+ * - QR Code exibido como imagem base64
+ * - Atualização automática via Socket.IO
+ * - Polling para verificar novo QR Code
+ * - Melhor feedback visual
  */
 
 const App = {
@@ -22,7 +28,9 @@ const App = {
     state: {
         initialized: false,
         sidebarCollapsed: false,
-        sidebarMobileOpen: false
+        sidebarMobileOpen: false,
+        whatsappConnected: false,
+        qrCodePollingInterval: null
     },
 
     // Parâmetros da navegação
@@ -138,17 +146,100 @@ const App = {
                 console.log('🔌 Socket.IO desconectado');
             });
 
-            // Eventos globais
-            Socket.on('whatsapp:status', (data) => {
-                this.updateWhatsAppStatusUI(data.status === 'connected');
-            });
+            // ============================================
+            // EVENTOS DO WHATSAPP
+            // ============================================
 
-            Socket.on('whatsapp:qr', (data) => {
-                // Se estiver na página do WhatsApp, atualiza QR
+            // Status mudou
+            Socket.on('whatsapp:status', (data) => {
+                console.log('📱 [Socket] Status WhatsApp:', data);
+                this.updateWhatsAppStatusUI(data.status === 'connected');
+                
+                // Se estiver na página do WhatsApp, atualiza
                 if (this.currentPage === 'whatsapp') {
-                    this.showQRCode(data.qrCode);
+                    this.initWhatsAppPage();
                 }
             });
+
+            // QR Code recebido
+            Socket.on('whatsapp:qr', async (data) => {
+                console.log('📱 [Socket] QR Code recebido');
+                
+                // Se estiver na página do WhatsApp, atualiza o QR
+                if (this.currentPage === 'whatsapp') {
+                    if (data.qrCode) {
+                        await this.showQRCode(data.qrCode);
+                    } else {
+                        // Solicita o QR Code via API
+                        await this.requestQRCode();
+                    }
+                }
+            });
+
+            // Conectado
+            Socket.on('whatsapp:connected', (data) => {
+                console.log('📱 [Socket] WhatsApp conectado:', data);
+                this.state.whatsappConnected = true;
+                this.updateWhatsAppStatusUI(true);
+                this.stopQRCodePolling();
+                
+                if (this.currentPage === 'whatsapp') {
+                    Toast.success('WhatsApp conectado com sucesso!');
+                    this.initWhatsAppPage();
+                }
+            });
+
+            // Desconectado
+            Socket.on('whatsapp:disconnected', (data) => {
+                console.log('📱 [Socket] WhatsApp desconectado:', data);
+                this.state.whatsappConnected = false;
+                this.updateWhatsAppStatusUI(false);
+                
+                if (this.currentPage === 'whatsapp') {
+                    Toast.warning('WhatsApp desconectado');
+                    this.initWhatsAppPage();
+                }
+            });
+
+            // Reconectando
+            Socket.on('whatsapp:reconnecting', (data) => {
+                console.log('📱 [Socket] Reconectando WhatsApp:', data);
+                
+                if (this.currentPage === 'whatsapp') {
+                    const statusTitle = document.getElementById('wa-status-title');
+                    if (statusTitle) {
+                        statusTitle.textContent = `Reconectando... (${data.attempt}/${data.maxAttempts})`;
+                    }
+                }
+            });
+
+            // Reiniciando
+            Socket.on('whatsapp:restarting', () => {
+                console.log('📱 [Socket] Reiniciando WhatsApp');
+                
+                if (this.currentPage === 'whatsapp') {
+                    const statusTitle = document.getElementById('wa-status-title');
+                    if (statusTitle) {
+                        statusTitle.textContent = 'Reiniciando conexão...';
+                    }
+                }
+            });
+
+            // Logout
+            Socket.on('whatsapp:logout', () => {
+                console.log('📱 [Socket] Logout do WhatsApp');
+                this.state.whatsappConnected = false;
+                this.updateWhatsAppStatusUI(false);
+                
+                if (this.currentPage === 'whatsapp') {
+                    Toast.info('Sessão encerrada. Escaneie o QR Code para reconectar.');
+                    this.initWhatsAppPage();
+                }
+            });
+
+            // ============================================
+            // EVENTOS DE MENSAGENS
+            // ============================================
 
             Socket.on('message:received', (data) => {
                 // Atualiza badge de mensagens não lidas
@@ -202,6 +293,11 @@ const App = {
         if (!page) return;
 
         console.log(`📄 Navegando para: ${page}`);
+
+        // Para polling do QR Code se sair da página do WhatsApp
+        if (this.currentPage === 'whatsapp' && page !== 'whatsapp') {
+            this.stopQRCodePolling();
+        }
 
         // Salva parâmetros
         this.navParams = params;
@@ -455,6 +551,7 @@ const App = {
             const response = await API.whatsapp.getStatus();
             
             if (response.success) {
+                this.state.whatsappConnected = response.data.connected;
                 this.updateWhatsAppStatusUI(response.data.connected);
             }
         } catch (error) {
@@ -468,6 +565,8 @@ const App = {
      * @param {boolean} connected - Se está conectado
      */
     updateWhatsAppStatusUI(connected) {
+        this.state.whatsappConnected = connected;
+
         // Status no header
         const statusEl = document.getElementById('whatsapp-status');
         if (statusEl) {
@@ -495,26 +594,44 @@ const App = {
         }, 30000);
     },
 
+    // ============================================
+    // PÁGINA DO WHATSAPP - ATUALIZADA
+    // ============================================
+
     /**
      * Inicializa página do WhatsApp
      */
     async initWhatsAppPage() {
+        console.log('📱 Inicializando página do WhatsApp...');
+
         try {
             const response = await API.whatsapp.getStatus();
             
             if (response.success) {
-                const { connected, phoneNumber, qrCode } = response.data;
+                const { connected, phoneNumber, qrCode, lastConnected, uptime, retryCount } = response.data;
                 
+                console.log('📱 Status:', { connected, hasQR: !!qrCode, phoneNumber });
+
+                // Atualiza estado
+                this.state.whatsappConnected = connected;
+
                 // Atualiza ícone de status
                 const statusIcon = document.getElementById('wa-status-icon');
                 if (statusIcon) {
                     statusIcon.className = `status-icon ${connected ? 'connected' : 'disconnected'}`;
+                    statusIcon.innerHTML = `<i class="fab fa-whatsapp"></i>`;
                 }
 
                 // Atualiza título
                 const statusTitle = document.getElementById('wa-status-title');
                 if (statusTitle) {
-                    statusTitle.textContent = connected ? 'WhatsApp Conectado' : 'WhatsApp Desconectado';
+                    if (connected) {
+                        statusTitle.textContent = 'WhatsApp Conectado';
+                    } else if (retryCount > 0) {
+                        statusTitle.textContent = `Reconectando... (tentativa ${retryCount})`;
+                    } else {
+                        statusTitle.textContent = 'WhatsApp Desconectado';
+                    }
                 }
 
                 // Atualiza subtítulo
@@ -531,35 +648,50 @@ const App = {
                 const btnLogout = document.getElementById('btn-wa-logout');
 
                 if (connected) {
+                    // WhatsApp conectado
                     if (qrContainer) qrContainer.style.display = 'none';
                     if (connectedInfo) connectedInfo.style.display = 'block';
                     if (btnLogout) btnLogout.style.display = 'inline-flex';
 
+                    // Para o polling do QR Code
+                    this.stopQRCodePolling();
+
                     // Preenche informações
                     const phoneEl = document.getElementById('wa-phone-number');
-                    if (phoneEl) phoneEl.textContent = Utils.formatPhone(phoneNumber || '');
+                    if (phoneEl) {
+                        phoneEl.textContent = phoneNumber 
+                            ? Utils.formatPhone(phoneNumber) 
+                            : 'Não identificado';
+                    }
 
-                    const connectedSince = document.getElementById('wa-connected-since');
-                    if (connectedSince) connectedSince.textContent = response.data.lastConnected 
-                        ? Utils.formatDate(response.data.lastConnected, true)
-                        : '-';
+                    const connectedSinceEl = document.getElementById('wa-connected-since');
+                    if (connectedSinceEl) {
+                        connectedSinceEl.textContent = lastConnected 
+                            ? Utils.formatDate(lastConnected, true)
+                            : '-';
+                    }
 
-                    const uptime = document.getElementById('wa-uptime');
-                    if (uptime && response.data.uptime) {
-                        uptime.textContent = Utils.formatDuration(Math.floor(response.data.uptime / 1000));
+                    const uptimeEl = document.getElementById('wa-uptime');
+                    if (uptimeEl && uptime) {
+                        uptimeEl.textContent = Utils.formatDuration(Math.floor(uptime / 1000));
                     }
                 } else {
+                    // WhatsApp desconectado
                     if (qrContainer) qrContainer.style.display = 'block';
                     if (connectedInfo) connectedInfo.style.display = 'none';
                     if (btnLogout) btnLogout.style.display = 'none';
 
                     // Mostra QR Code se disponível
                     if (qrCode) {
-                        this.showQRCode(qrCode);
+                        await this.showQRCode(qrCode);
                     } else {
-                        // Solicita novo QR Code
-                        this.requestQRCode();
+                        // Mostra loading e solicita QR Code
+                        this.showQRCodeLoading();
+                        await this.requestQRCode();
                     }
+
+                    // Inicia polling para atualizar QR Code
+                    this.startQRCodePolling();
                 }
             }
 
@@ -572,51 +704,214 @@ const App = {
         } catch (error) {
             console.error('Erro ao inicializar página WhatsApp:', error);
             Toast.error('Erro ao carregar status do WhatsApp');
+            
+            // Mostra estado de erro
+            const statusTitle = document.getElementById('wa-status-title');
+            if (statusTitle) {
+                statusTitle.textContent = 'Erro ao carregar status';
+            }
         }
     },
 
     /**
-     * Mostra QR Code
-     * @param {string} qrCode - String do QR Code
+     * Mostra loading no lugar do QR Code
      */
-    showQRCode(qrCode) {
+    showQRCodeLoading() {
         const qrContainer = document.getElementById('qr-code');
-        if (!qrContainer || !qrCode) return;
-
-        // Usa biblioteca QRCode para gerar imagem
-        if (typeof QRCode !== 'undefined') {
-            qrContainer.innerHTML = '';
-            QRCode.toCanvas(qrContainer, qrCode, {
-                width: 256,
-                margin: 2,
-                color: {
-                    dark: '#000000',
-                    light: '#ffffff'
-                }
-            }, (error) => {
-                if (error) {
-                    console.error('Erro ao gerar QR Code:', error);
-                    qrContainer.innerHTML = '<p class="text-danger">Erro ao gerar QR Code</p>';
-                }
-            });
-        } else {
-            // Fallback - mostra como texto
-            qrContainer.innerHTML = `<pre style="font-size: 6px; line-height: 6px;">${qrCode}</pre>`;
+        if (qrContainer) {
+            qrContainer.innerHTML = `
+                <div class="qr-loading">
+                    <i class="fas fa-spinner fa-spin fa-3x"></i>
+                    <p>Gerando QR Code...</p>
+                </div>
+            `;
         }
     },
 
     /**
-     * Solicita novo QR Code
+     * Mostra QR Code como imagem
+     * @param {string} qrCode - String do QR Code ou base64
+     */
+    async showQRCode(qrCode) {
+        const qrContainer = document.getElementById('qr-code');
+        if (!qrContainer || !qrCode) {
+            console.warn('Container QR ou QR Code não disponível');
+            return;
+        }
+
+        console.log('📱 Exibindo QR Code...');
+
+        try {
+            // Verifica se já é base64 (começa com data:image)
+            if (qrCode.startsWith('data:image')) {
+                // Já é base64, exibe diretamente como imagem
+                qrContainer.innerHTML = `
+                    <img src="${qrCode}" alt="QR Code WhatsApp" class="qr-image" />
+                `;
+            } else if (typeof QRCode !== 'undefined' && QRCode.toCanvas) {
+                // Usa biblioteca QRCode para gerar canvas
+                qrContainer.innerHTML = '<canvas id="qr-canvas"></canvas>';
+                const canvas = document.getElementById('qr-canvas');
+                
+                await QRCode.toCanvas(canvas, qrCode, {
+                    width: 280,
+                    margin: 2,
+                    color: {
+                        dark: '#000000',
+                        light: '#ffffff'
+                    }
+                });
+            } else if (typeof QRCode !== 'undefined' && QRCode.toDataURL) {
+                // Alternativa: gera data URL
+                const dataUrl = await QRCode.toDataURL(qrCode, {
+                    width: 280,
+                    margin: 2
+                });
+                qrContainer.innerHTML = `<img src="${dataUrl}" alt="QR Code WhatsApp" class="qr-image" />`;
+            } else {
+                // Fallback: tenta exibir como pré-formatado (para QR em ASCII)
+                console.warn('Biblioteca QRCode não disponível, usando fallback');
+                qrContainer.innerHTML = `
+                    <div class="qr-fallback">
+                        <pre style="font-size: 4px; line-height: 4px; letter-spacing: -1px;">${qrCode}</pre>
+                    </div>
+                `;
+            }
+
+            // Atualiza subtítulo
+            const statusSubtitle = document.getElementById('wa-status-subtitle');
+            if (statusSubtitle) {
+                statusSubtitle.textContent = 'Escaneie o QR Code para conectar';
+            }
+
+        } catch (error) {
+            console.error('Erro ao exibir QR Code:', error);
+            qrContainer.innerHTML = `
+                <div class="qr-error">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <p>Erro ao gerar QR Code</p>
+                    <button class="btn btn-sm btn-outline" onclick="App.requestQRCode()">
+                        <i class="fas fa-sync"></i> Tentar novamente
+                    </button>
+                </div>
+            `;
+        }
+    },
+
+    /**
+     * Solicita novo QR Code via API
      */
     async requestQRCode() {
+        console.log('📱 Solicitando QR Code...');
+
         try {
-            const response = await API.whatsapp.getQRCode();
+            // Primeiro tenta o endpoint /qr
+            let response = await API.whatsapp.getQR();
             
-            if (response.success && response.data.qrCode) {
-                this.showQRCode(response.data.qrCode);
+            if (response.success && response.data) {
+                if (response.data.connected) {
+                    // Já está conectado!
+                    console.log('📱 WhatsApp já está conectado');
+                    this.initWhatsAppPage();
+                    return;
+                }
+                
+                if (response.data.available && response.data.qrCode) {
+                    await this.showQRCode(response.data.qrCode);
+                    return;
+                }
             }
+
+            // Se não conseguiu, tenta via status
+            response = await API.whatsapp.getStatus();
+            
+            if (response.success && response.data) {
+                if (response.data.connected) {
+                    this.initWhatsAppPage();
+                    return;
+                }
+                
+                if (response.data.qrCode) {
+                    await this.showQRCode(response.data.qrCode);
+                    return;
+                }
+            }
+
+            // QR Code não disponível
+            const qrContainer = document.getElementById('qr-code');
+            if (qrContainer) {
+                qrContainer.innerHTML = `
+                    <div class="qr-waiting">
+                        <i class="fas fa-clock fa-3x"></i>
+                        <p>Aguardando QR Code...</p>
+                        <small>O QR Code será exibido automaticamente</small>
+                    </div>
+                `;
+            }
+
         } catch (error) {
             console.error('Erro ao solicitar QR Code:', error);
+            
+            const qrContainer = document.getElementById('qr-code');
+            if (qrContainer) {
+                qrContainer.innerHTML = `
+                    <div class="qr-error">
+                        <i class="fas fa-exclamation-circle fa-3x"></i>
+                        <p>Erro ao obter QR Code</p>
+                        <button class="btn btn-sm btn-primary" onclick="App.requestQRCode()">
+                            <i class="fas fa-sync"></i> Tentar novamente
+                        </button>
+                    </div>
+                `;
+            }
+        }
+    },
+
+    /**
+     * Inicia polling para atualizar QR Code
+     */
+    startQRCodePolling() {
+        // Para polling existente
+        this.stopQRCodePolling();
+
+        console.log('📱 Iniciando polling do QR Code...');
+
+        // Atualiza a cada 5 segundos
+        this.state.qrCodePollingInterval = setInterval(async () => {
+            // Só continua se estiver na página do WhatsApp e não conectado
+            if (this.currentPage !== 'whatsapp' || this.state.whatsappConnected) {
+                this.stopQRCodePolling();
+                return;
+            }
+
+            try {
+                const response = await API.whatsapp.getStatus();
+                
+                if (response.success && response.data) {
+                    if (response.data.connected) {
+                        // Conectou! Atualiza a página
+                        console.log('📱 WhatsApp conectou durante polling');
+                        this.stopQRCodePolling();
+                        this.initWhatsAppPage();
+                    } else if (response.data.qrCode) {
+                        // Atualiza QR Code se mudou
+                        await this.showQRCode(response.data.qrCode);
+                    }
+                }
+            } catch (error) {
+                console.error('Erro no polling do QR Code:', error);
+            }
+        }, 5000);
+    },
+
+    /**
+     * Para polling do QR Code
+     */
+    stopQRCodePolling() {
+        if (this.state.qrCodePollingInterval) {
+            console.log('📱 Parando polling do QR Code');
+            clearInterval(this.state.qrCodePollingInterval);
+            this.state.qrCodePollingInterval = null;
         }
     },
 
@@ -624,30 +919,41 @@ const App = {
      * Configura botões da página WhatsApp
      */
     setupWhatsAppButtons() {
-        // Reiniciar
+        // Remove listeners antigos clonando os elementos
         const btnRestart = document.getElementById('btn-wa-restart');
+        const btnLogout = document.getElementById('btn-wa-logout');
+
+        // Reiniciar
         if (btnRestart) {
-            btnRestart.addEventListener('click', async () => {
-                btnRestart.disabled = true;
-                btnRestart.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reiniciando...';
+            const newBtnRestart = btnRestart.cloneNode(true);
+            btnRestart.parentNode.replaceChild(newBtnRestart, btnRestart);
+            
+            newBtnRestart.addEventListener('click', async () => {
+                newBtnRestart.disabled = true;
+                newBtnRestart.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reiniciando...';
                 
                 try {
                     await API.whatsapp.restart();
-                    Toast.success('WhatsApp reiniciado!');
-                    setTimeout(() => this.initWhatsAppPage(), 2000);
+                    Toast.success('WhatsApp reiniciando...');
+                    
+                    // Aguarda um pouco e atualiza a página
+                    setTimeout(() => {
+                        this.initWhatsAppPage();
+                    }, 3000);
                 } catch (error) {
                     Toast.error('Erro ao reiniciar WhatsApp');
-                } finally {
-                    btnRestart.disabled = false;
-                    btnRestart.innerHTML = '<i class="fas fa-sync"></i> Reiniciar Conexão';
+                    newBtnRestart.disabled = false;
+                    newBtnRestart.innerHTML = '<i class="fas fa-sync"></i> Reiniciar Conexão';
                 }
             });
         }
 
-        // Logout
-        const btnLogout = document.getElementById('btn-wa-logout');
+        // Logout/Desconectar
         if (btnLogout) {
-            btnLogout.addEventListener('click', async () => {
+            const newBtnLogout = btnLogout.cloneNode(true);
+            btnLogout.parentNode.replaceChild(newBtnLogout, btnLogout);
+            
+            newBtnLogout.addEventListener('click', async () => {
                 const confirmed = await Modal.confirm(
                     'Desconectar WhatsApp',
                     'Tem certeza que deseja desconectar? Será necessário escanear o QR Code novamente.'
@@ -655,18 +961,21 @@ const App = {
 
                 if (!confirmed) return;
 
-                btnLogout.disabled = true;
-                btnLogout.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Desconectando...';
+                newBtnLogout.disabled = true;
+                newBtnLogout.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Desconectando...';
 
                 try {
                     await API.whatsapp.logout();
                     Toast.success('WhatsApp desconectado!');
-                    this.initWhatsAppPage();
+                    
+                    // Atualiza a página
+                    setTimeout(() => {
+                        this.initWhatsAppPage();
+                    }, 1000);
                 } catch (error) {
                     Toast.error('Erro ao desconectar');
-                } finally {
-                    btnLogout.disabled = false;
-                    btnLogout.innerHTML = '<i class="fas fa-sign-out-alt"></i> Desconectar';
+                    newBtnLogout.disabled = false;
+                    newBtnLogout.innerHTML = '<i class="fas fa-sign-out-alt"></i> Desconectar';
                 }
             });
         }
@@ -696,6 +1005,10 @@ const App = {
         }
     },
 
+    // ============================================
+    // PÁGINA DE CONFIGURAÇÕES
+    // ============================================
+
     /**
      * Inicializa página de configurações
      */
@@ -724,15 +1037,22 @@ const App = {
     fillSettingsForm(settings) {
         // Loja
         if (settings.store) {
-            document.getElementById('store-name').value = settings.store.name || '';
-            document.getElementById('store-phone').value = settings.store.phone || '';
-            document.getElementById('store-address').value = settings.store.address || '';
+            const storeName = document.getElementById('store-name');
+            const storePhone = document.getElementById('store-phone');
+            const storeAddress = document.getElementById('store-address');
+            
+            if (storeName) storeName.value = settings.store.name || '';
+            if (storePhone) storePhone.value = settings.store.phone || '';
+            if (storeAddress) storeAddress.value = settings.store.address || '';
         }
 
         // Horário
         if (settings.schedule) {
-            document.getElementById('schedule-start').value = settings.schedule.startTime || '08:00';
-            document.getElementById('schedule-end').value = settings.schedule.endTime || '18:00';
+            const scheduleStart = document.getElementById('schedule-start');
+            const scheduleEnd = document.getElementById('schedule-end');
+            
+            if (scheduleStart) scheduleStart.value = settings.schedule.startTime || '08:00';
+            if (scheduleEnd) scheduleEnd.value = settings.schedule.endTime || '18:00';
 
             // Dias da semana
             const days = settings.schedule.workDays || [];
@@ -743,15 +1063,22 @@ const App = {
 
         // Bot
         if (settings.bot) {
-            document.getElementById('bot-name').value = settings.bot.name || '';
-            document.getElementById('bot-typing-delay').value = settings.bot.typingDelay || 1000;
-            document.getElementById('bot-ai-enabled').checked = settings.bot.aiEnabled !== false;
+            const botName = document.getElementById('bot-name');
+            const botTypingDelay = document.getElementById('bot-typing-delay');
+            const botAiEnabled = document.getElementById('bot-ai-enabled');
+            
+            if (botName) botName.value = settings.bot.name || '';
+            if (botTypingDelay) botTypingDelay.value = settings.bot.typingDelay || 1000;
+            if (botAiEnabled) botAiEnabled.checked = settings.bot.aiEnabled !== false;
         }
 
         // Conta
         if (Auth.user) {
-            document.getElementById('account-name').value = Auth.getUserName();
-            document.getElementById('account-email').value = Auth.getUserEmail();
+            const accountName = document.getElementById('account-name');
+            const accountEmail = document.getElementById('account-email');
+            
+            if (accountName) accountName.value = Auth.getUserName();
+            if (accountEmail) accountEmail.value = Auth.getUserEmail();
         }
     },
 
@@ -802,9 +1129,9 @@ const App = {
     async saveStoreSettings() {
         try {
             const data = {
-                name: document.getElementById('store-name').value,
-                phone: document.getElementById('store-phone').value,
-                address: document.getElementById('store-address').value
+                name: document.getElementById('store-name')?.value,
+                phone: document.getElementById('store-phone')?.value,
+                address: document.getElementById('store-address')?.value
             };
 
             await API.settings.updateStore(data);
@@ -825,8 +1152,8 @@ const App = {
             });
 
             const data = {
-                startTime: document.getElementById('schedule-start').value,
-                endTime: document.getElementById('schedule-end').value,
+                startTime: document.getElementById('schedule-start')?.value,
+                endTime: document.getElementById('schedule-end')?.value,
                 workDays
             };
 
@@ -843,9 +1170,9 @@ const App = {
     async saveBotSettings() {
         try {
             const data = {
-                name: document.getElementById('bot-name').value,
-                typingDelay: parseInt(document.getElementById('bot-typing-delay').value) || 1000,
-                aiEnabled: document.getElementById('bot-ai-enabled').checked
+                name: document.getElementById('bot-name')?.value,
+                typingDelay: parseInt(document.getElementById('bot-typing-delay')?.value) || 1000,
+                aiEnabled: document.getElementById('bot-ai-enabled')?.checked
             };
 
             await API.settings.updateBot(data);
@@ -860,11 +1187,11 @@ const App = {
      */
     async saveAccountSettings() {
         try {
-            const name = document.getElementById('account-name').value;
-            const password = document.getElementById('account-password').value;
+            const name = document.getElementById('account-name')?.value;
+            const password = document.getElementById('account-password')?.value;
 
             // Atualiza nome
-            if (name !== Auth.getUserName()) {
+            if (name && name !== Auth.getUserName()) {
                 await Auth.updateProfile({ nome: name });
             }
 
@@ -904,6 +1231,7 @@ const App = {
 
         // Logout
         window.addEventListener('auth:logout', () => {
+            this.stopQRCodePolling();
             this.showLogin();
         });
 
@@ -941,8 +1269,11 @@ const App = {
             if (!document.hidden) {
                 // Página voltou a ser visível - atualiza dados
                 if (this.currentPage === 'conversations') {
-                    Conversations.refresh();
+                    Conversations.refresh?.();
                 }
+                
+                // Atualiza status do WhatsApp
+                this.loadWhatsAppStatus();
             }
         });
     },
@@ -1002,12 +1333,6 @@ const App = {
 // ============================================
 
 const Toast = {
-    /**
-     * Mostra toast
-     * @param {string} type - Tipo (success, error, warning, info)
-     * @param {string} message - Mensagem
-     * @param {number} duration - Duração em ms
-     */
     show(type, message, duration = 4000) {
         const container = document.getElementById('toast-container');
         if (!container) return;
@@ -1041,14 +1366,12 @@ const Toast = {
             </button>
         `;
 
-        // Evento de fechar
         toast.querySelector('.toast-close').addEventListener('click', () => {
             this.hide(toast);
         });
 
         container.appendChild(toast);
 
-        // Auto-hide
         setTimeout(() => {
             this.hide(toast);
         }, duration);
@@ -1061,21 +1384,10 @@ const Toast = {
         }, 300);
     },
 
-    success(message, duration) {
-        this.show('success', message, duration);
-    },
-
-    error(message, duration) {
-        this.show('error', message, duration);
-    },
-
-    warning(message, duration) {
-        this.show('warning', message, duration);
-    },
-
-    info(message, duration) {
-        this.show('info', message, duration);
-    }
+    success(message, duration) { this.show('success', message, duration); },
+    error(message, duration) { this.show('error', message, duration); },
+    warning(message, duration) { this.show('warning', message, duration); },
+    info(message, duration) { this.show('info', message, duration); }
 };
 
 // ============================================
@@ -1086,15 +1398,8 @@ const Modal = {
     currentModal: null,
     confirmCallback: null,
 
-    /**
-     * Mostra modal genérico
-     * @param {string} title - Título
-     * @param {string} content - Conteúdo HTML
-     * @param {object} options - Opções
-     */
     async show(title, content, options = {}) {
         return new Promise((resolve) => {
-            // Cria modal
             const modal = document.createElement('div');
             modal.className = 'modal active';
             modal.innerHTML = `
@@ -1106,9 +1411,7 @@ const Modal = {
                             <i class="fas fa-times"></i>
                         </button>
                     </div>
-                    <div class="modal-body">
-                        ${content}
-                    </div>
+                    <div class="modal-body">${content}</div>
                     ${options.buttons ? `
                         <div class="modal-footer">
                             ${options.buttons.map(btn => `
@@ -1124,7 +1427,6 @@ const Modal = {
             document.body.appendChild(modal);
             this.currentModal = modal;
 
-            // Eventos
             modal.querySelector('.modal-overlay').addEventListener('click', () => {
                 this.close();
                 resolve(null);
@@ -1135,7 +1437,6 @@ const Modal = {
                 resolve(null);
             });
 
-            // Botões customizados
             if (options.buttons) {
                 modal.querySelectorAll('.modal-footer button').forEach((btn, index) => {
                     btn.addEventListener('click', async () => {
@@ -1156,12 +1457,6 @@ const Modal = {
         });
     },
 
-    /**
-     * Modal de confirmação
-     * @param {string} title - Título
-     * @param {string} message - Mensagem
-     * @returns {Promise<boolean>}
-     */
     async confirm(title, message) {
         return new Promise((resolve) => {
             const modal = document.getElementById('confirm-modal');
@@ -1180,10 +1475,8 @@ const Modal = {
             modal.classList.add('active');
             this.currentModal = modal;
 
-            // Callback de confirmação
             this.confirmCallback = resolve;
 
-            // Evento do botão confirmar
             const handleConfirm = () => {
                 modal.classList.remove('active');
                 resolve(true);
@@ -1192,7 +1485,6 @@ const Modal = {
 
             btnConfirm.addEventListener('click', handleConfirm);
 
-            // Evento de fechar
             modal.querySelectorAll('[data-close-modal]').forEach(btn => {
                 btn.addEventListener('click', () => {
                     modal.classList.remove('active');
@@ -1207,12 +1499,6 @@ const Modal = {
         });
     },
 
-    /**
-     * Modal com prompt/input
-     * @param {string} title - Título
-     * @param {string} content - Conteúdo HTML
-     * @param {object} options - Opções
-     */
     async prompt(title, content, options = {}) {
         return new Promise((resolve) => {
             const modal = document.createElement('div');
@@ -1226,9 +1512,7 @@ const Modal = {
                             <i class="fas fa-times"></i>
                         </button>
                     </div>
-                    <div class="modal-body">
-                        ${content}
-                    </div>
+                    <div class="modal-body">${content}</div>
                     <div class="modal-footer">
                         <button class="btn btn-outline" data-close-modal>Cancelar</button>
                         <button class="btn btn-primary" id="prompt-confirm">${options.confirmText || 'Confirmar'}</button>
@@ -1239,7 +1523,6 @@ const Modal = {
             document.body.appendChild(modal);
             this.currentModal = modal;
 
-            // Eventos de fechar
             modal.querySelector('.modal-overlay').addEventListener('click', () => {
                 modal.remove();
                 resolve(null);
@@ -1252,7 +1535,6 @@ const Modal = {
                 });
             });
 
-            // Evento de confirmar
             modal.querySelector('#prompt-confirm').addEventListener('click', async () => {
                 if (options.onConfirm) {
                     const result = await options.onConfirm();
@@ -1270,7 +1552,6 @@ const Modal = {
                 }
             });
 
-            // Foca no primeiro input
             setTimeout(() => {
                 const input = modal.querySelector('input, textarea, select');
                 if (input) input.focus();
@@ -1278,17 +1559,13 @@ const Modal = {
         });
     },
 
-    /**
-     * Fecha modal atual
-     */
     close() {
         if (this.currentModal) {
             this.currentModal.classList.remove('active');
             
-            // Remove se for modal dinâmico
             if (!this.currentModal.id) {
                 setTimeout(() => {
-                    this.currentModal.remove();
+                    this.currentModal?.remove();
                 }, 300);
             }
             
@@ -1301,12 +1578,10 @@ const Modal = {
 // INICIALIZAÇÃO
 // ============================================
 
-// Aguarda DOM estar pronto
 document.addEventListener('DOMContentLoaded', () => {
     App.init();
 });
 
-// Exporta para uso global
 window.App = App;
 window.Toast = Toast;
 window.Modal = Modal;
