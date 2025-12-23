@@ -1,10 +1,17 @@
 /**
  * ============================================
- * SERVIÇO DO WHATSAPP
+ * SERVIÇO DO WHATSAPP - VERSÃO CORRIGIDA
  * ============================================
  * 
  * Gerencia conexão com WhatsApp via Baileys,
  * envio e recebimento de mensagens.
+ * 
+ * CORREÇÕES APLICADAS:
+ * - Melhor tratamento de desconexões
+ * - Prevenção de loops infinitos de reconexão
+ * - Logs mais detalhados
+ * - Limpeza adequada do socket
+ * - Timeouts ajustados
  */
 
 const { 
@@ -39,6 +46,7 @@ let connectionState = {
     retryCount: 0,
     lastConnected: null,
     phoneNumber: null,
+    isReconnecting: false, // NOVO: Previne reconexões simultâneas
 };
 
 // Máximo de tentativas de reconexão
@@ -50,13 +58,11 @@ const AUTH_PATH = path.join(process.cwd(), 'auth');
 // Callback para mensagens recebidas
 let messageCallback = null;
 
-// ============================================
-// NOVO: Callback para notificações em tempo real
-// ============================================
+// Callback para notificações em tempo real
 let notificationCallback = null;
 
 /**
- * NOVO: Define callback para notificações em tempo real (Socket.IO)
+ * Define callback para notificações em tempo real (Socket.IO)
  * @param {Function} callback - Função de callback (event, data)
  */
 function setNotificationCallback(callback) {
@@ -69,7 +75,7 @@ function setNotificationCallback(callback) {
 }
 
 /**
- * NOVO: Envia notificação via callback (se definido)
+ * Envia notificação via callback (se definido)
  * @param {string} event - Nome do evento
  * @param {object} data - Dados do evento
  */
@@ -97,12 +103,45 @@ function ensureAuthDirectory() {
 }
 
 /**
+ * NOVO: Limpa socket existente antes de reconectar
+ */
+function cleanupSocket() {
+    if (sock) {
+        try {
+            // Remove todos os listeners para evitar vazamento de memória
+            sock.ev.removeAllListeners('connection.update');
+            sock.ev.removeAllListeners('creds.update');
+            sock.ev.removeAllListeners('messages.upsert');
+            sock.ev.removeAllListeners('presence.update');
+            
+            // Tenta fechar o socket
+            if (sock.ws && sock.ws.readyState === sock.ws.OPEN) {
+                sock.ws.close();
+            }
+            
+            logger.debug('🧹 Socket anterior limpo');
+        } catch (error) {
+            logger.debug('Erro ao limpar socket:', error.message);
+        } finally {
+            sock = null;
+        }
+    }
+}
+
+/**
  * Inicializa a conexão com o WhatsApp
  * @param {function} onMessage - Callback para mensagens recebidas
  * @returns {object} Socket do WhatsApp
  */
 async function initialize(onMessage = null) {
     try {
+        // NOVO: Previne inicializações simultâneas
+        if (connectionState.isReconnecting) {
+            logger.warn('⚠️ Reconexão já em andamento, aguardando...');
+            return null;
+        }
+
+        connectionState.isReconnecting = true;
         ensureAuthDirectory();
         
         // Salva callback de mensagens
@@ -117,7 +156,10 @@ async function initialize(onMessage = null) {
         // Carrega credenciais salvas
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
 
-        // Cria socket do WhatsApp
+        // NOVO: Limpa socket anterior antes de criar novo
+        cleanupSocket();
+
+        // Cria socket do WhatsApp com timeouts ajustados
         sock = makeWASocket({
             version,
             auth: {
@@ -129,11 +171,14 @@ async function initialize(onMessage = null) {
             markOnlineOnConnect: true,
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000,
-            keepAliveIntervalMs: 30000,
+            connectTimeoutMs: 90000, // AJUSTADO: 90 segundos
+            defaultQueryTimeoutMs: 90000, // AJUSTADO: 90 segundos
+            keepAliveIntervalMs: 25000, // AJUSTADO: 25 segundos
             emitOwnEvents: false,
-            fireInitQueries: false,
+            fireInitQueries: true, // MUDADO: Permite queries iniciais
+            getMessage: async (key) => { // NOVO: Handler para mensagens antigas
+                return { conversation: '' };
+            },
         });
 
         // Configura handlers de eventos
@@ -144,8 +189,76 @@ async function initialize(onMessage = null) {
         return sock;
     } catch (error) {
         logger.error('❌ Erro ao inicializar WhatsApp:', error.message);
+        connectionState.isReconnecting = false;
         throw error;
     }
+}
+
+/**
+ * NOVO: Analisa código de desconexão e retorna informações detalhadas
+ * @param {object} lastDisconnect - Objeto de desconexão
+ * @returns {object} Informações da desconexão
+ */
+function analyzeDisconnect(lastDisconnect) {
+    // Estrutura de fallback
+    const result = {
+        statusCode: null,
+        reason: 'Desconhecido',
+        shouldReconnect: false,
+        shouldLogout: false,
+    };
+
+    // Verifica se lastDisconnect existe
+    if (!lastDisconnect) {
+        logger.warn('⚠️ lastDisconnect está undefined/null');
+        return result;
+    }
+
+    // Tenta extrair statusCode de diferentes localizações possíveis
+    const statusCode = lastDisconnect?.error?.output?.statusCode 
+        || lastDisconnect?.error?.statusCode
+        || lastDisconnect?.statusCode
+        || null;
+
+    result.statusCode = statusCode;
+
+    // Mapeia códigos de desconexão conhecidos
+    const disconnectReasons = {
+        [DisconnectReason.badSession]: 'Sessão inválida',
+        [DisconnectReason.connectionClosed]: 'Conexão fechada',
+        [DisconnectReason.connectionLost]: 'Conexão perdida',
+        [DisconnectReason.connectionReplaced]: 'Conectado em outro lugar',
+        [DisconnectReason.loggedOut]: 'Logout do WhatsApp',
+        [DisconnectReason.restartRequired]: 'Reinício necessário',
+        [DisconnectReason.timedOut]: 'Timeout de conexão',
+        [DisconnectReason.unavailableService]: 'Serviço indisponível',
+    };
+
+    // Define razão e ações baseadas no código
+    if (statusCode) {
+        result.reason = disconnectReasons[statusCode] || `Código ${statusCode}`;
+        
+        // Define se deve reconectar
+        result.shouldReconnect = statusCode !== DisconnectReason.loggedOut 
+            && statusCode !== DisconnectReason.connectionReplaced;
+        
+        // Define se deve fazer logout
+        result.shouldLogout = statusCode === DisconnectReason.loggedOut 
+            || statusCode === DisconnectReason.badSession;
+    } else {
+        // Se não há statusCode, analisa a mensagem de erro
+        const errorMessage = lastDisconnect?.error?.message 
+            || lastDisconnect?.message 
+            || 'Sem mensagem de erro';
+        
+        logger.warn(`⚠️ Desconexão sem statusCode. Erro: ${errorMessage}`);
+        
+        // Em caso de dúvida, tenta reconectar
+        result.shouldReconnect = true;
+        result.reason = errorMessage;
+    }
+
+    return result;
 }
 
 /**
@@ -157,6 +270,9 @@ function setupEventHandlers(socket, saveCreds) {
     // Evento de atualização de conexão
     socket.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
+
+        // Log detalhado do update para debugging
+        logger.debug(`Connection update: connection=${connection}, hasQR=${!!qr}, hasLastDisconnect=${!!lastDisconnect}`);
 
         // QR Code gerado
         if (qr) {
@@ -174,7 +290,6 @@ function setupEventHandlers(socket, saveCreds) {
             console.log('═══════════════════════════════════════════════════════');
             console.log('\n');
 
-            // NOVO: Notifica painel web sobre QR Code
             sendNotification('whatsapp:qr', { qrCode: qr });
         }
 
@@ -184,6 +299,7 @@ function setupEventHandlers(socket, saveCreds) {
             connectionState.qrCode = null;
             connectionState.retryCount = 0;
             connectionState.lastConnected = new Date().toISOString();
+            connectionState.isReconnecting = false; // NOVO: Reseta flag
             
             // Tenta obter número do telefone conectado
             if (socket.user) {
@@ -192,7 +308,6 @@ function setupEventHandlers(socket, saveCreds) {
             
             logger.whatsappStatus('Conectado com sucesso! ✅');
 
-            // NOVO: Notifica painel web sobre conexão
             sendNotification('whatsapp:connected', {
                 phoneNumber: connectionState.phoneNumber,
                 lastConnected: connectionState.lastConnected
@@ -204,33 +319,19 @@ function setupEventHandlers(socket, saveCreds) {
             connectionState.isConnected = false;
             connectionState.lastDisconnect = lastDisconnect;
 
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            // NOVO: Analisa desconexão de forma robusta
+            const disconnectInfo = analyzeDisconnect(lastDisconnect);
+            
+            logger.warn(`⚠️ Conexão fechada. Razão: ${disconnectInfo.reason} (código: ${disconnectInfo.statusCode || 'undefined'})`);
 
-            logger.warn(`⚠️ Conexão fechada. Código: ${statusCode}`);
-
-            // NOVO: Notifica painel web sobre desconexão
             sendNotification('whatsapp:disconnected', {
-                statusCode,
-                willReconnect: shouldReconnect
+                statusCode: disconnectInfo.statusCode,
+                reason: disconnectInfo.reason,
+                willReconnect: disconnectInfo.shouldReconnect
             });
 
-            if (shouldReconnect && connectionState.retryCount < MAX_RETRY_COUNT) {
-                connectionState.retryCount++;
-                const delay = Math.min(1000 * Math.pow(2, connectionState.retryCount), 30000);
-                
-                logger.info(`🔄 Reconectando em ${delay/1000}s... (tentativa ${connectionState.retryCount}/${MAX_RETRY_COUNT})`);
-                
-                // NOVO: Notifica painel web sobre reconexão
-                sendNotification('whatsapp:reconnecting', {
-                    attempt: connectionState.retryCount,
-                    maxAttempts: MAX_RETRY_COUNT,
-                    delayMs: delay
-                });
-
-                await sleep(delay);
-                await initialize(messageCallback);
-            } else if (statusCode === DisconnectReason.loggedOut) {
+            // Trata logout
+            if (disconnectInfo.shouldLogout) {
                 logger.error('❌ Deslogado do WhatsApp. Delete a pasta auth/ e escaneie o QR novamente.');
                 
                 // Remove credenciais inválidas
@@ -239,18 +340,56 @@ function setupEventHandlers(socket, saveCreds) {
                     logger.info('🗑️ Credenciais removidas');
                 }
 
-                // NOVO: Notifica painel web sobre logout
+                connectionState.isReconnecting = false;
                 sendNotification('whatsapp:logged_out', {
                     message: 'Necessário escanear QR Code novamente'
                 });
-            } else {
-                logger.error('❌ Máximo de tentativas de reconexão atingido');
-                
-                // NOVO: Notifica painel web sobre falha
-                sendNotification('whatsapp:connection_failed', {
-                    message: 'Máximo de tentativas de reconexão atingido'
-                });
+                return;
             }
+
+            // Trata reconexão
+            if (disconnectInfo.shouldReconnect && connectionState.retryCount < MAX_RETRY_COUNT) {
+                connectionState.retryCount++;
+                
+                // Backoff exponencial com máximo de 30 segundos
+                const delay = Math.min(1000 * Math.pow(2, connectionState.retryCount), 30000);
+                
+                logger.info(`🔄 Reconectando em ${delay/1000}s... (tentativa ${connectionState.retryCount}/${MAX_RETRY_COUNT})`);
+                
+                sendNotification('whatsapp:reconnecting', {
+                    attempt: connectionState.retryCount,
+                    maxAttempts: MAX_RETRY_COUNT,
+                    delayMs: delay,
+                    reason: disconnectInfo.reason
+                });
+
+                // Aguarda e reconecta
+                await sleep(delay);
+                
+                // Verifica se ainda deve reconectar
+                if (connectionState.retryCount <= MAX_RETRY_COUNT && !connectionState.isConnected) {
+                    await initialize(messageCallback);
+                } else {
+                    connectionState.isReconnecting = false;
+                }
+            } else if (connectionState.retryCount >= MAX_RETRY_COUNT) {
+                logger.error('❌ Máximo de tentativas de reconexão atingido');
+                connectionState.isReconnecting = false;
+                
+                sendNotification('whatsapp:connection_failed', {
+                    message: 'Máximo de tentativas de reconexão atingido',
+                    attempts: connectionState.retryCount
+                });
+            } else {
+                // Não deve reconectar
+                connectionState.isReconnecting = false;
+                logger.warn('⚠️ Reconexão não será tentada para este tipo de desconexão');
+            }
+        }
+
+        // NOVO: Trata estado "connecting"
+        if (connection === 'connecting') {
+            logger.info('🔄 Conectando ao WhatsApp...');
         }
     });
 
@@ -269,7 +408,6 @@ function setupEventHandlers(socket, saveCreds) {
 
     // Evento de presença (online/offline/digitando)
     socket.ev.on('presence.update', ({ id, presences }) => {
-        // Pode ser usado para detectar quando usuário está online
         logger.debug(`Presença atualizada: ${id}`);
     });
 }
@@ -302,7 +440,6 @@ async function handleIncomingMessage(msg) {
 
         logger.messageReceived(messageData.phone, messageData.text);
 
-        // NOVO: Notifica painel web sobre nova mensagem
         sendNotification('message:received', {
             phone: messageData.phone,
             text: messageData.text,
@@ -327,7 +464,6 @@ async function handleIncomingMessage(msg) {
 function extractMessageData(msg) {
     const messageContent = msg.message;
     
-    // Extrai texto de diferentes tipos de mensagem
     let text = '';
     let type = 'unknown';
 
@@ -379,7 +515,6 @@ async function sendMessage(to, message) {
             throw new Error('WhatsApp não conectado');
         }
 
-        // Formata JID se necessário
         const jid = to.includes('@') ? to : formatPhoneForWhatsApp(to);
 
         // Simula digitação
@@ -396,7 +531,6 @@ async function sendMessage(to, message) {
 
         logger.messageSent(extractPhoneFromJid(jid), message);
 
-        // NOVO: Notifica painel web sobre mensagem enviada
         sendNotification('message:sent', {
             phone: extractPhoneFromJid(jid),
             text: message,
@@ -498,11 +632,9 @@ async function sendMedia(to, mediaUrl, caption = '', type = 'image') {
 
         let mediaBuffer;
         if (mediaUrl.startsWith('http')) {
-            // Baixa mídia da URL
             const response = await fetch(mediaUrl);
             mediaBuffer = Buffer.from(await response.arrayBuffer());
         } else {
-            // Lê do arquivo local
             mediaBuffer = fs.readFileSync(mediaUrl);
         }
 
@@ -560,7 +692,6 @@ async function sendLocation(to, location) {
 
         const jid = to.includes('@') ? to : formatPhoneForWhatsApp(to);
 
-        // Suporta tanto objeto quanto parâmetros separados
         const latitude = location.latitude || location;
         const longitude = location.longitude || arguments[2];
         const name = location.name || arguments[3] || '';
@@ -605,7 +736,6 @@ async function sendContact(to, contact, phone = null) {
 
         const jid = to.includes('@') ? to : formatPhoneForWhatsApp(to);
 
-        // Suporta tanto objeto quanto parâmetros separados
         const name = typeof contact === 'object' ? contact.name : contact;
         const contactPhone = typeof contact === 'object' ? contact.phone : phone;
 
@@ -857,8 +987,9 @@ async function disconnect() {
     try {
         if (sock) {
             await sock.logout();
-            sock = null;
+            cleanupSocket();
             connectionState.isConnected = false;
+            connectionState.isReconnecting = false;
             logger.info('👋 Desconectado do WhatsApp');
             
             sendNotification('whatsapp:disconnected', {
@@ -885,10 +1016,11 @@ async function logout() {
             logger.info('🗑️ Credenciais removidas');
         }
 
-        sock = null;
+        cleanupSocket();
         connectionState.isConnected = false;
         connectionState.qrCode = null;
         connectionState.phoneNumber = null;
+        connectionState.isReconnecting = false;
 
         sendNotification('whatsapp:logged_out', {
             message: 'Sessão encerrada'
@@ -909,13 +1041,11 @@ async function restart() {
     
     sendNotification('whatsapp:restarting', {});
 
-    if (sock) {
-        sock.end();
-        sock = null;
-    }
+    cleanupSocket();
     
     connectionState.isConnected = false;
     connectionState.retryCount = 0;
+    connectionState.isReconnecting = false;
     
     await sleep(2000);
     await initialize(messageCallback);
@@ -960,7 +1090,6 @@ async function getStats() {
  * @returns {object} Estatísticas
  */
 async function getMessageStats(period = 'today') {
-    // Esta função pode ser expandida para buscar do banco de dados
     return {
         period,
         sent: 0,
@@ -1020,16 +1149,11 @@ async function getGroupInfo(groupId) {
     }
 }
 
-// ============================================
-// FUNÇÕES DE TEMPLATES (PLACEHOLDER)
-// ============================================
-
 /**
  * Lista templates de mensagem
  * @returns {array} Lista de templates
  */
 async function getMessageTemplates() {
-    // Pode ser expandido para buscar do banco de dados
     return [];
 }
 
@@ -1039,7 +1163,6 @@ async function getMessageTemplates() {
  * @returns {number} ID do template
  */
 async function createMessageTemplate(template) {
-    // Pode ser expandido para salvar no banco de dados
     logger.info(`Template criado: ${template.name}`);
     return Date.now();
 }
@@ -1051,7 +1174,6 @@ async function createMessageTemplate(template) {
  * @returns {boolean} Sucesso
  */
 async function updateMessageTemplate(id, data) {
-    // Pode ser expandido para atualizar no banco de dados
     logger.info(`Template atualizado: ${id}`);
     return true;
 }
@@ -1062,14 +1184,9 @@ async function updateMessageTemplate(id, data) {
  * @returns {boolean} Sucesso
  */
 async function deleteMessageTemplate(id) {
-    // Pode ser expandido para remover do banco de dados
     logger.info(`Template removido: ${id}`);
     return true;
 }
-
-// ============================================
-// FUNÇÕES DE CONFIGURAÇÃO (PLACEHOLDER)
-// ============================================
 
 /**
  * Obtém configurações do WhatsApp
@@ -1089,13 +1206,8 @@ async function getConfig() {
  * @param {object} config - Novas configurações
  */
 async function updateConfig(config) {
-    // Pode ser expandido para salvar configurações
     logger.info('Configurações do WhatsApp atualizadas');
 }
-
-// ============================================
-// FUNÇÕES DE WEBHOOK (PLACEHOLDER)
-// ============================================
 
 /**
  * Processa mensagem recebida via webhook
@@ -1150,7 +1262,6 @@ module.exports = {
     updateConfig,
     processWebhookMessage,
     processMessageStatus,
-    // NOVO: Funções de notificação
     setNotificationCallback,
     sendNotification,
 };
