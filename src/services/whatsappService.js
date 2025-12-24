@@ -1,12 +1,15 @@
 /**
  * ============================================
- * SERVIÇO DO WHATSAPP - VERSÃO ANTI-CONFLITO
+ * SERVIÇO DO WHATSAPP - VERSÃO 3.0
  * ============================================
  * 
  * CORREÇÕES APLICADAS:
  * - Tratamento do erro 515 (Stream Error)
+ * - Tratamento do erro 401 (device_removed)
  * - Timeouts aumentados para conexão
+ * - Browser identificação corrigida
  * - Melhor gestão de reconexão
+ * - Configurações otimizadas para estabilidade
  */
 
 const { 
@@ -17,6 +20,7 @@ const {
     makeCacheableSignalKeyStore,
     isJidBroadcast,
     isJidGroup,
+    Browsers,
 } = require('@whiskeysockets/baileys');
 
 const pino = require('pino');
@@ -35,13 +39,13 @@ const { formatPhoneForWhatsApp, extractPhoneFromJid } = require('../utils/format
 // ============================================
 
 const AUTH_PATH = process.env.AUTH_PATH || path.join(process.cwd(), 'auth');
-const MAX_RETRY_COUNT = 5; // Aumentado para dar mais chances
-const INIT_DELAY = 5000; // 5 segundos
-const RECONNECT_DELAY = 15000; // 15 segundos (reduzido para erro 515)
-const STREAM_ERROR_DELAY = 10000; // 10 segundos para erro 515
-const QR_TIMEOUT = 90000; // 90 segundos (aumentado)
-const CONNECTION_TIMEOUT = 180000; // 3 minutos (aumentado)
-const CONFLICT_COOLDOWN = 120000; // 2 minutos de espera após conflito
+const MAX_RETRY_COUNT = 5;
+const INIT_DELAY = 3000;
+const RECONNECT_DELAY = 10000;
+const STREAM_ERROR_DELAY = 8000;
+const QR_TIMEOUT = 120000; // 2 minutos
+const CONNECTION_TIMEOUT = 180000; // 3 minutos
+const CONFLICT_COOLDOWN = 180000; // 3 minutos após conflito
 
 // ============================================
 // ESTADO GLOBAL
@@ -52,7 +56,8 @@ let saveCreds = null;
 let initializationLock = false;
 let initializationPromise = null;
 let lastConflictTime = 0;
-let streamErrorCount = 0; // Contador de erros 515
+let streamErrorCount = 0;
+let connectionStartTime = null;
 
 const connectionState = {
     isConnected: false,
@@ -79,7 +84,7 @@ let notificationCallback = null;
 
 console.log('\n');
 console.log('╔══════════════════════════════════════════════════════════════╗');
-console.log('║   WHATSAPP SERVICE - VERSÃO ANTI-CONFLITO + FIX 515          ║');
+console.log('║   WHATSAPP SERVICE - VERSÃO 3.0 (ANTI-CONFLICT)              ║');
 console.log('╚══════════════════════════════════════════════════════════════╝');
 console.log('   ├─ AUTH_PATH:', AUTH_PATH);
 console.log('   ├─ MAX_RETRY:', MAX_RETRY_COUNT);
@@ -166,9 +171,6 @@ function ensureAuthDirectory() {
     }
 }
 
-/**
- * Limpa credenciais (versão segura)
- */
 function clearCredentials() {
     console.log('\n🗑️ [CLEAR] Limpando credenciais...');
     
@@ -180,7 +182,6 @@ function clearCredentials() {
             
             files.forEach(file => {
                 if (file === 'lost+found' || file.startsWith('.')) {
-                    console.log(`   ├─ [SKIP] ${file} (sistema)`);
                     skipped++;
                     return;
                 }
@@ -192,10 +193,8 @@ function clearCredentials() {
                     
                     if (stats.isFile()) {
                         fs.unlinkSync(filePath);
-                        console.log(`   ├─ [DEL] ${file}`);
                         removed++;
                     } else {
-                        console.log(`   ├─ [SKIP] ${file} (diretório)`);
                         skipped++;
                     }
                 } catch (err) {
@@ -229,6 +228,11 @@ function cleanupSocket() {
                 }
             }
             
+            // Tenta fazer end() se existir
+            if (typeof sock.end === 'function') {
+                sock.end();
+            }
+            
             console.log('   └─ ✅ Socket limpo');
         } catch (error) {
             console.error('   └─ ⚠️ Erro:', error.message);
@@ -245,6 +249,7 @@ function resetState() {
     connectionState.qrCode = null;
     connectionState.isReconnecting = false;
     connectionState.lastError = null;
+    connectionStartTime = null;
 }
 
 // ============================================
@@ -288,6 +293,7 @@ async function initialize(onMessage = null) {
 
 async function _doInitialize(onMessage) {
     connectionState.initializationAttempts++;
+    connectionStartTime = Date.now();
     
     console.log('\n');
     console.log('╔══════════════════════════════════════════════════════════════╗');
@@ -311,7 +317,7 @@ async function _doInitialize(onMessage) {
             messageCallback = onMessage;
         }
 
-        // Delay inicial maior para primeira tentativa
+        // Delay inicial
         if (connectionState.initializationAttempts === 1) {
             console.log(`\n⏳ [INIT] Delay inicial de ${INIT_DELAY/1000}s...`);
             await sleep(INIT_DELAY);
@@ -341,7 +347,7 @@ async function _doInitialize(onMessage) {
         console.log('   └─ Keys exist:', !!authState.state.keys);
 
         // ============================================
-        // CONFIGURAÇÃO DO SOCKET - OTIMIZADA
+        // CONFIGURAÇÃO DO SOCKET - VERSÃO 3.0
         // ============================================
         const socketConfig = {
             version,
@@ -353,33 +359,63 @@ async function _doInitialize(onMessage) {
                 ),
             },
             logger: pino({ level: 'silent' }),
-            browser: ['AutoBot Loja', 'Chrome', '120.0.0'],
+            
+            // Browser - usando identificação padrão do Baileys
+            browser: Browsers.ubuntu('Chrome'),
+            
+            // Configurações de conexão otimizadas
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
             
-            // TIMEOUTS AUMENTADOS PARA RAILWAY
+            // Timeouts aumentados
             connectTimeoutMs: CONNECTION_TIMEOUT,
-            defaultQueryTimeoutMs: CONNECTION_TIMEOUT,
-            keepAliveIntervalMs: 25000,
-            retryRequestDelayMs: 3000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 15000,
+            retryRequestDelayMs: 2000,
             
-            maxMsgRetryCount: 5,
+            // QR e mensagens
             qrTimeout: QR_TIMEOUT,
+            maxMsgRetryCount: 3,
             printQRInTerminal: false,
             
             // Configurações adicionais para estabilidade
             emitOwnEvents: true,
-            fireInitQueries: true,
+            fireInitQueries: false, // Mudado para false
             
-            getMessage: async () => ({ conversation: '' }),
+            // Não sincronizar histórico (evita conflitos)
+            shouldSyncHistoryMessage: () => false,
+            
+            // Patch para mensagens
+            patchMessageBeforeSending: (message) => {
+                const requiresPatch = !!(message.buttonsMessage || message.listMessage);
+                if (requiresPatch) {
+                    message = { 
+                        viewOnceMessage: { 
+                            message: { 
+                                messageContextInfo: { 
+                                    deviceListMetadataVersion: 2, 
+                                    deviceListMetadata: {} 
+                                }, 
+                                ...message 
+                            } 
+                        } 
+                    };
+                }
+                return message;
+            },
+            
+            getMessage: async (key) => {
+                return { conversation: '' };
+            },
         };
 
         console.log('\n🔌 [SOCKET] Criando conexão...');
-        console.log('   ├─ Browser:', socketConfig.browser.join(' / '));
+        console.log('   ├─ Browser: Ubuntu (Chrome)');
         console.log('   ├─ connectTimeoutMs:', socketConfig.connectTimeoutMs);
         console.log('   ├─ qrTimeout:', socketConfig.qrTimeout);
         console.log('   ├─ keepAliveIntervalMs:', socketConfig.keepAliveIntervalMs);
+        console.log('   ├─ fireInitQueries:', socketConfig.fireInitQueries);
         console.log('   └─ markOnlineOnConnect:', socketConfig.markOnlineOnConnect);
         
         sock = makeWASocket(socketConfig);
@@ -410,11 +446,13 @@ function setupEventHandlers(socket, saveCredsFunc) {
         const { connection, lastDisconnect, qr, isNewLogin, receivedPendingNotifications } = update;
         
         const timestamp = new Date().toISOString();
+        const connectionDuration = connectionStartTime ? Math.round((Date.now() - connectionStartTime) / 1000) : 0;
         
         console.log('\n┌─────────────────────────────────────────────────────────┐');
         console.log('│              CONNECTION UPDATE                          │');
         console.log('├─────────────────────────────────────────────────────────┤');
         console.log('│ Timestamp:', timestamp);
+        console.log('│ Duração desde início:', connectionDuration, 'segundos');
         console.log('│ connection:', connection || '(undefined)');
         console.log('│ hasQR:', !!qr);
         console.log('│ isNewLogin:', isNewLogin);
@@ -430,7 +468,8 @@ function setupEventHandlers(socket, saveCredsFunc) {
             connection, 
             hasQR: !!qr, 
             isNewLogin,
-            hasLastDisconnect: !!lastDisconnect
+            hasLastDisconnect: !!lastDisconnect,
+            connectionDuration
         });
 
         // ===== QR CODE =====
@@ -441,6 +480,7 @@ function setupEventHandlers(socket, saveCredsFunc) {
             
             // Reset contadores quando novo QR é gerado
             streamErrorCount = 0;
+            connectionState.retryCount = 0;
             
             console.log('\n');
             console.log('╔═══════════════════════════════════════════════════════╗');
@@ -477,7 +517,7 @@ function setupEventHandlers(socket, saveCredsFunc) {
             connectionState.lastConnected = new Date().toISOString();
             connectionState.isReconnecting = false;
             connectionState.lastError = null;
-            streamErrorCount = 0; // Reset contador de erro 515
+            streamErrorCount = 0;
             
             if (socket.user) {
                 connectionState.phoneNumber = socket.user.id.split(':')[0];
@@ -487,13 +527,15 @@ function setupEventHandlers(socket, saveCredsFunc) {
             }
             
             console.log('   ├─ Timestamp:', connectionState.lastConnected);
-            console.log('   └─ Status: Aguardando estabilização...');
+            console.log('   ├─ Duração para conectar:', connectionDuration, 'segundos');
+            console.log('   └─ Status: Verificando estabilidade...');
             
-            console.log('\n⏳ [STABILITY] Verificando estabilidade da conexão (5s)...');
+            // Verificação de estabilidade aumentada para 10 segundos
+            console.log('\n⏳ [STABILITY] Verificando estabilidade da conexão (10s)...');
             
             setTimeout(() => {
                 if (connectionState.isConnected) {
-                    console.log('✅ [STABILITY] Conexão estável!');
+                    console.log('✅ [STABILITY] Conexão estável após 10 segundos!');
                     logger.whatsappStatus('Conectado com sucesso! ✅');
                     sendNotification('whatsapp:connected', {
                         phoneNumber: connectionState.phoneNumber,
@@ -501,11 +543,14 @@ function setupEventHandlers(socket, saveCredsFunc) {
                         stable: true
                     });
                 } else {
-                    console.log('⚠️ [STABILITY] Conexão instável - foi fechada');
+                    console.log('⚠️ [STABILITY] Conexão foi fechada durante verificação');
                 }
-            }, 5000);
+            }, 10000);
 
-            addToHistory('connected', { phoneNumber: connectionState.phoneNumber });
+            addToHistory('connected', { 
+                phoneNumber: connectionState.phoneNumber,
+                connectionDuration
+            });
         }
 
         // ===== DESCONECTADO =====
@@ -514,10 +559,11 @@ function setupEventHandlers(socket, saveCredsFunc) {
             console.log('╔═══════════════════════════════════════════════════════╗');
             console.log('║              ⚠️ CONEXÃO FECHADA                       ║');
             console.log('╚═══════════════════════════════════════════════════════╝');
+            console.log('   └─ Duração da sessão:', connectionDuration, 'segundos');
             
             connectionState.isConnected = false;
             
-            await handleDisconnect(lastDisconnect);
+            await handleDisconnect(lastDisconnect, connectionDuration);
         }
 
         // ===== CONECTANDO =====
@@ -533,13 +579,13 @@ function setupEventHandlers(socket, saveCredsFunc) {
         connectionState.credsUpdateCount++;
         const count = connectionState.credsUpdateCount;
         
-        if (count <= 5 || count % 5 === 0) {
+        if (count <= 3 || count % 10 === 0) {
             console.log(`🔐 [CREDS] Salvando credenciais (#${count})...`);
         }
         
         try {
             await saveCredsFunc();
-            if (count <= 5 || count % 5 === 0) {
+            if (count <= 3 || count % 10 === 0) {
                 console.log('   └─ ✅ Salvo');
             }
         } catch (error) {
@@ -560,10 +606,10 @@ function setupEventHandlers(socket, saveCredsFunc) {
 }
 
 // ============================================
-// TRATAMENTO DE DESCONEXÃO - COM FIX PARA 515
+// TRATAMENTO DE DESCONEXÃO - VERSÃO 3.0
 // ============================================
 
-async function handleDisconnect(lastDisconnect) {
+async function handleDisconnect(lastDisconnect, connectionDuration = 0) {
     const statusCode = lastDisconnect?.error?.output?.statusCode;
     const errorMessage = lastDisconnect?.error?.message || 'Desconhecido';
     const errorData = lastDisconnect?.error?.data;
@@ -572,33 +618,43 @@ async function handleDisconnect(lastDisconnect) {
     console.log('   ├─ StatusCode:', statusCode);
     console.log('   ├─ Mensagem:', errorMessage);
     console.log('   ├─ Dados:', JSON.stringify(errorData || {}));
+    console.log('   ├─ Duração da conexão:', connectionDuration, 'segundos');
     
-    // Verifica tipos de erro
+    // Análise do erro
+    const errorString = JSON.stringify(errorData || '');
+    
     const isConflict = errorMessage.includes('conflict') || 
-                       JSON.stringify(errorData || '').includes('conflict') ||
-                       JSON.stringify(errorData || '').includes('device_removed');
+                       errorString.includes('conflict') ||
+                       errorString.includes('device_removed');
     
-    const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
-    const isBadSession = statusCode === DisconnectReason.badSession;
+    const isLoggedOut = statusCode === DisconnectReason.loggedOut || 
+                        statusCode === 401;
+    
+    const isBadSession = statusCode === DisconnectReason.badSession ||
+                         statusCode === 500;
+    
     const isConnectionLost = statusCode === DisconnectReason.connectionLost || 
-                             statusCode === DisconnectReason.connectionClosed;
+                             statusCode === DisconnectReason.connectionClosed ||
+                             statusCode === DisconnectReason.connectionReplaced;
     
-    // ✅ NOVO: Detecta erro 515 (Stream Error)
     const isStreamError = statusCode === 515 || 
                           errorMessage.includes('Stream Errored') ||
                           errorMessage.includes('restart required');
     
-    // ✅ NOVO: Detecta erro de timeout
     const isTimeout = statusCode === DisconnectReason.timedOut ||
                       errorMessage.includes('timed out') ||
                       errorMessage.includes('timeout');
+    
+    // Verifica se foi desconexão rápida (menos de 2 minutos)
+    const wasQuickDisconnect = connectionDuration > 0 && connectionDuration < 120;
     
     console.log('   ├─ É conflito:', isConflict ? 'SIM ⚠️' : 'NÃO');
     console.log('   ├─ É logout:', isLoggedOut ? 'SIM' : 'NÃO');
     console.log('   ├─ É bad session:', isBadSession ? 'SIM' : 'NÃO');
     console.log('   ├─ É connection lost:', isConnectionLost ? 'SIM' : 'NÃO');
     console.log('   ├─ É stream error (515):', isStreamError ? 'SIM ⚠️' : 'NÃO');
-    console.log('   └─ É timeout:', isTimeout ? 'SIM' : 'NÃO');
+    console.log('   ├─ É timeout:', isTimeout ? 'SIM' : 'NÃO');
+    console.log('   └─ Desconexão rápida (<2min):', wasQuickDisconnect ? 'SIM ⚠️' : 'NÃO');
 
     addToHistory('disconnected', { 
         statusCode, 
@@ -606,41 +662,56 @@ async function handleDisconnect(lastDisconnect) {
         isConflict, 
         isLoggedOut,
         isStreamError,
-        isTimeout
+        isTimeout,
+        connectionDuration,
+        wasQuickDisconnect
     });
 
     sendNotification('whatsapp:disconnected', {
         statusCode,
         reason: errorMessage,
         isConflict,
-        isStreamError
+        isStreamError,
+        connectionDuration
     });
 
-    // ===== TRATAMENTO DE CONFLITO/LOGOUT =====
+    // ===== TRATAMENTO DE CONFLITO/LOGOUT/DEVICE_REMOVED =====
     if (isConflict || isLoggedOut || isBadSession) {
         connectionState.conflictCount++;
         lastConflictTime = Date.now();
         
         console.log('\n🚨 [CONFLICT] Conflito/Logout detectado!');
         console.log('   ├─ Total de conflitos:', connectionState.conflictCount);
-        console.log('   ├─ Ação: Limpando credenciais');
-        console.log('   └─ Cooldown:', CONFLICT_COOLDOWN/1000, 'segundos');
+        console.log('   ├─ Ação: Limpando TODAS as credenciais');
         
+        // Limpa credenciais
         clearCredentials();
         
+        // Cooldown aumentado para conflitos frequentes
+        let cooldown = CONFLICT_COOLDOWN;
+        if (connectionState.conflictCount >= 3) {
+            cooldown = CONFLICT_COOLDOWN * 2; // 6 minutos
+            console.log('   ├─ ⚠️ Muitos conflitos! Cooldown dobrado');
+        }
+        if (connectionState.conflictCount >= 5) {
+            cooldown = CONFLICT_COOLDOWN * 3; // 9 minutos
+            console.log('   ├─ 🚨 Conflitos excessivos! Cooldown triplicado');
+        }
+        
+        console.log(`   └─ Cooldown: ${cooldown/1000} segundos`);
+        
         sendNotification('whatsapp:logged_out', {
-            message: 'Sessão encerrada. Aguarde o cooldown e escaneie novamente.',
+            message: 'Dispositivo removido. Aguarde o cooldown e escaneie novamente.',
             conflictCount: connectionState.conflictCount,
-            cooldownSeconds: CONFLICT_COOLDOWN/1000
+            cooldownSeconds: cooldown/1000
         });
         
-        const extraCooldown = connectionState.conflictCount > 3 ? 60000 : 0;
-        const totalCooldown = CONFLICT_COOLDOWN + extraCooldown;
+        console.log(`\n⏳ [COOLDOWN] Aguardando ${cooldown/1000}s antes de gerar novo QR...`);
+        console.log('   └─ Não escaneie nenhum QR durante este período!');
         
-        console.log(`\n⏳ [COOLDOWN] Aguardando ${totalCooldown/1000}s antes de gerar novo QR...`);
+        await sleep(cooldown);
         
-        await sleep(totalCooldown);
-        
+        // Reset estados
         connectionState.retryCount = 0;
         streamErrorCount = 0;
         initializationLock = false;
@@ -649,32 +720,28 @@ async function handleDisconnect(lastDisconnect) {
         return;
     }
 
-    // ===== ✅ NOVO: TRATAMENTO DE ERRO 515 (Stream Error) =====
-    if (isStreamError) {
+    // ===== TRATAMENTO DE ERRO 515 (Stream Error) =====
+    if (isStreamError && !isConflict) {
         streamErrorCount++;
         
         console.log('\n🔄 [STREAM ERROR 515] Erro de stream detectado!');
         console.log('   ├─ Contador de erros 515:', streamErrorCount);
-        console.log('   ├─ Isso é comum durante o processo de conexão');
-        console.log('   ├─ Geralmente resolve com retry automático');
         
-        // Se muitos erros 515 consecutivos, limpa credenciais
-        if (streamErrorCount >= 5) {
+        if (streamErrorCount >= 3) {
             console.log('   ├─ ⚠️ Muitos erros 515! Limpando credenciais...');
             clearCredentials();
             streamErrorCount = 0;
             connectionState.retryCount = 0;
             
-            console.log(`   └─ Aguardando 30s antes de gerar novo QR...`);
-            await sleep(30000);
+            console.log(`   └─ Aguardando 60s antes de gerar novo QR...`);
+            await sleep(60000);
             
             initializationLock = false;
             await initialize(messageCallback);
             return;
         }
         
-        // Retry normal para erro 515
-        const delay = STREAM_ERROR_DELAY + (streamErrorCount * 2000); // Aumenta delay progressivamente
+        const delay = STREAM_ERROR_DELAY + (streamErrorCount * 3000);
         console.log(`   └─ Tentando reconectar em ${delay/1000} segundos...`);
         
         sendNotification('whatsapp:reconnecting', {
@@ -690,7 +757,7 @@ async function handleDisconnect(lastDisconnect) {
         return;
     }
 
-    // ===== ✅ NOVO: TRATAMENTO DE TIMEOUT =====
+    // ===== TRATAMENTO DE TIMEOUT =====
     if (isTimeout) {
         connectionState.retryCount++;
         
@@ -701,18 +768,12 @@ async function handleDisconnect(lastDisconnect) {
             const delay = RECONNECT_DELAY + (connectionState.retryCount * 5000);
             console.log(`   └─ Tentando reconectar em ${delay/1000}s...`);
             
-            sendNotification('whatsapp:reconnecting', {
-                attempt: connectionState.retryCount,
-                reason: 'Timeout',
-                delaySeconds: delay/1000
-            });
-            
             await sleep(delay);
             
             initializationLock = false;
             await initialize(messageCallback);
         } else {
-            console.log('   └─ Máximo de tentativas atingido. Limpando credenciais...');
+            console.log('   └─ Máximo de tentativas. Limpando credenciais...');
             clearCredentials();
             connectionState.retryCount = 0;
             
@@ -724,7 +785,7 @@ async function handleDisconnect(lastDisconnect) {
         return;
     }
 
-    // ===== RECONEXÃO NORMAL (Connection Lost) =====
+    // ===== RECONEXÃO NORMAL =====
     if (isConnectionLost && connectionState.retryCount < MAX_RETRY_COUNT) {
         connectionState.retryCount++;
         
@@ -744,7 +805,7 @@ async function handleDisconnect(lastDisconnect) {
         return;
     }
     
-    // ===== FALLBACK: Qualquer outro erro =====
+    // ===== FALLBACK =====
     if (connectionState.retryCount < MAX_RETRY_COUNT) {
         connectionState.retryCount++;
         
@@ -757,12 +818,15 @@ async function handleDisconnect(lastDisconnect) {
         await initialize(messageCallback);
     } else {
         console.log('\n❌ [RECONNECT] Máximo de tentativas atingido');
-        console.log('   └─ Aguardando intervenção manual ou novo deploy');
+        console.log('   └─ Limpando credenciais e reiniciando...');
         
-        sendNotification('whatsapp:connection_failed', {
-            message: 'Máximo de tentativas atingido',
-            attempts: connectionState.retryCount
-        });
+        clearCredentials();
+        connectionState.retryCount = 0;
+        
+        await sleep(60000);
+        
+        initializationLock = false;
+        await initialize(messageCallback);
     }
 }
 
@@ -1129,7 +1193,11 @@ async function logout() {
         console.log('\n🚪 [LOGOUT] Fazendo logout...');
         
         if (sock) {
-            await sock.logout();
+            try {
+                await sock.logout();
+            } catch (e) {
+                console.log('   ├─ Aviso no logout:', e.message);
+            }
         }
         
         clearCredentials();
