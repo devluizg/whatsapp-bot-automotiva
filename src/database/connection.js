@@ -34,7 +34,7 @@ async function initPool() {
             queueLimit: config.queueLimit,
             charset: config.charset,
             timezone: config.timezone,
-            multipleStatements: true, // Permite múltiplas queries (para migrations)
+            multipleStatements: true,
         });
 
         // Testa a conexão
@@ -62,6 +62,7 @@ function getPool() {
 
 /**
  * Executa uma query SQL
+ * ✅ CORRIGIDO: Usando query() em vez de execute()
  * @param {string} sql - Query SQL
  * @param {array} params - Parâmetros da query
  * @returns {array} Resultado da query
@@ -69,10 +70,30 @@ function getPool() {
 async function query(sql, params = []) {
     try {
         const poolConnection = getPool();
-        const [results] = await poolConnection.execute(sql, params);
+        // ✅ query() faz escape seguro e funciona com LIMIT ?
+        const [results] = await poolConnection.query(sql, params);
         return results;
     } catch (error) {
         logger.error('❌ Erro na query:', error.message);
+        logger.error('SQL:', sql);
+        logger.error('Params:', params);
+        throw error;
+    }
+}
+
+/**
+ * Executa uma query com prepared statement (para casos específicos)
+ * @param {string} sql - Query SQL
+ * @param {array} params - Parâmetros da query
+ * @returns {array} Resultado da query
+ */
+async function execute(sql, params = []) {
+    try {
+        const poolConnection = getPool();
+        const [results] = await poolConnection.execute(sql, params);
+        return results;
+    } catch (error) {
+        logger.error('❌ Erro no execute:', error.message);
         logger.error('SQL:', sql);
         logger.error('Params:', params);
         throw error;
@@ -130,12 +151,12 @@ async function paginate(table, options = {}) {
         countSql += ` WHERE ${where}`;
     }
 
-    // Query para buscar dados
+    // Query para buscar dados - ✅ LIMIT e OFFSET interpolados diretamente
     let dataSql = `SELECT ${select} FROM ${table}`;
     if (where) {
         dataSql += ` WHERE ${where}`;
     }
-    dataSql += ` ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}`;
+    dataSql += ` ORDER BY ${orderBy} LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
 
     try {
         const [countResult] = await query(countSql, whereParams);
@@ -184,7 +205,7 @@ async function search(table, column, searchTerm, options = {}) {
         params.push(...extraParams);
     }
 
-    sql += ` ORDER BY ${orderBy} LIMIT ${limit}`;
+    sql += ` ORDER BY ${orderBy} LIMIT ${parseInt(limit)}`;
 
     return await query(sql, params);
 }
@@ -216,7 +237,7 @@ async function searchMultiple(table, columns, searchTerm, options = {}) {
         params.push(...extraParams);
     }
 
-    sql += ` ORDER BY ${orderBy} LIMIT ${limit}`;
+    sql += ` ORDER BY ${orderBy} LIMIT ${parseInt(limit)}`;
 
     return await query(sql, params);
 }
@@ -273,6 +294,7 @@ async function findWhere(table, where, whereParams = []) {
 
 /**
  * Insere um registro e retorna o ID inserido
+ * ✅ CORRIGIDO: Usando query() em vez de execute()
  * @param {string} table - Nome da tabela
  * @param {object} data - Dados para inserir
  * @returns {number} ID do registro inserido
@@ -286,7 +308,7 @@ async function insert(table, data) {
 
     try {
         const poolConnection = getPool();
-        const [result] = await poolConnection.execute(sql, values);
+        const [result] = await poolConnection.query(sql, values);
         logger.info(`✅ Inserido em ${table}: ID ${result.insertId}`);
         return result.insertId;
     } catch (error) {
@@ -297,6 +319,7 @@ async function insert(table, data) {
 
 /**
  * Insere múltiplos registros de uma vez
+ * ✅ CORRIGIDO: Usando query() em vez de execute()
  * @param {string} table - Nome da tabela
  * @param {array} dataArray - Array de objetos para inserir
  * @returns {number} Número de registros inseridos
@@ -315,7 +338,7 @@ async function insertMany(table, dataArray) {
 
     try {
         const poolConnection = getPool();
-        const [result] = await poolConnection.execute(sql, allValues);
+        const [result] = await poolConnection.query(sql, allValues);
         logger.info(`✅ Inseridos ${result.affectedRows} registros em ${table}`);
         return result.affectedRows;
     } catch (error) {
@@ -326,6 +349,7 @@ async function insertMany(table, dataArray) {
 
 /**
  * Insere ou atualiza (upsert)
+ * ✅ CORRIGIDO: Usando query() em vez de execute()
  * @param {string} table - Nome da tabela
  * @param {object} data - Dados para inserir/atualizar
  * @param {array} updateFields - Campos para atualizar em caso de duplicata
@@ -345,7 +369,7 @@ async function upsert(table, data, updateFields = []) {
 
     try {
         const poolConnection = getPool();
-        const [result] = await poolConnection.execute(sql, values);
+        const [result] = await poolConnection.query(sql, values);
         logger.info(`✅ Upsert em ${table}: ID ${result.insertId}`);
         return result.insertId;
     } catch (error) {
@@ -356,6 +380,7 @@ async function upsert(table, data, updateFields = []) {
 
 /**
  * Atualiza registros na tabela
+ * ✅ CORRIGIDO: Usando query() em vez de execute()
  * @param {string} table - Nome da tabela
  * @param {object} data - Dados para atualizar
  * @param {string} where - Condição WHERE
@@ -371,7 +396,7 @@ async function update(table, data, where, whereParams = []) {
 
     try {
         const poolConnection = getPool();
-        const [result] = await poolConnection.execute(sql, [...values, ...whereParams]);
+        const [result] = await poolConnection.query(sql, [...values, ...whereParams]);
         logger.info(`✅ Atualizado em ${table}: ${result.affectedRows} registro(s)`);
         return result.affectedRows;
     } catch (error) {
@@ -382,6 +407,7 @@ async function update(table, data, where, whereParams = []) {
 
 /**
  * Remove registros da tabela
+ * ✅ CORRIGIDO: Usando query() em vez de execute()
  * @param {string} table - Nome da tabela
  * @param {string} where - Condição WHERE
  * @param {array} whereParams - Parâmetros do WHERE
@@ -392,7 +418,7 @@ async function remove(table, where, whereParams = []) {
 
     try {
         const poolConnection = getPool();
-        const [result] = await poolConnection.execute(sql, whereParams);
+        const [result] = await poolConnection.query(sql, whereParams);
         logger.info(`✅ Removido de ${table}: ${result.affectedRows} registro(s)`);
         return result.affectedRows;
     } catch (error) {
@@ -487,7 +513,6 @@ async function migrate() {
         const migrationPath = path.join(__dirname, 'migrations.sql');
         const sql = fs.readFileSync(migrationPath, 'utf8');
 
-        // Usa queryRaw para permitir múltiplas statements
         await queryRaw(sql);
 
         logger.info('✅ Migrations executadas com sucesso!');
@@ -503,6 +528,7 @@ module.exports = {
     initPool,
     getPool,
     query,
+    execute,  // ← Nova função separada para casos que precisam de prepared statements
     queryRaw,
     queryOne,
     paginate,
