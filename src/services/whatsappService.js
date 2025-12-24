@@ -1,14 +1,7 @@
 /**
  * ============================================
- * SERVIÇO DO WHATSAPP - VERSÃO CORRIGIDA
+ * SERVIÇO DO WHATSAPP - VERSÃO ANTI-CONFLITO
  * ============================================
- * 
- * Correções aplicadas:
- * - Locking para evitar múltiplas conexões
- * - Melhor persistência de credenciais
- * - Tratamento de conflito/device_removed
- * - Delay inicial para evitar race conditions
- * - Singleton pattern mais robusto
  */
 
 const { 
@@ -33,24 +26,26 @@ const { sleep } = require('../utils/helpers');
 const { formatPhoneForWhatsApp, extractPhoneFromJid } = require('../utils/formatter');
 
 // ============================================
-// CONFIGURAÇÕES E CONSTANTES
+// CONFIGURAÇÕES
 // ============================================
 
 const AUTH_PATH = process.env.AUTH_PATH || path.join(process.cwd(), 'auth');
-const MAX_RETRY_COUNT = 5;
-const INIT_DELAY = 3000; // Delay antes de inicializar (evita race conditions)
-const RECONNECT_BASE_DELAY = 5000;
+const MAX_RETRY_COUNT = 3; // Reduzido para evitar rate limit
+const INIT_DELAY = 5000; // 5 segundos
+const RECONNECT_DELAY = 30000; // 30 segundos entre tentativas (evita rate limit)
 const QR_TIMEOUT = 60000;
 const CONNECTION_TIMEOUT = 120000;
+const CONFLICT_COOLDOWN = 120000; // 2 minutos de espera após conflito
 
 // ============================================
-// ESTADO GLOBAL (SINGLETON)
+// ESTADO GLOBAL
 // ============================================
 
 let sock = null;
-let saveCreds = null; // Referência global para salvar credenciais
-let initializationLock = false; // Lock para evitar múltiplas inicializações
-let initializationPromise = null; // Promise da inicialização atual
+let saveCreds = null;
+let initializationLock = false;
+let initializationPromise = null;
+let lastConflictTime = 0; // Timestamp do último conflito
 
 const connectionState = {
     isConnected: false,
@@ -63,10 +58,10 @@ const connectionState = {
     initializationAttempts: 0,
     lastError: null,
     connectionHistory: [],
-    credsUpdateCount: 0, // Contador de atualizações de credenciais
+    conflictCount: 0, // Contador de conflitos
+    lastQRTime: null, // Quando o último QR foi gerado
 };
 
-// Callbacks
 let messageCallback = null;
 let notificationCallback = null;
 
@@ -74,61 +69,55 @@ let notificationCallback = null;
 // LOG INICIAL
 // ============================================
 
-console.log('\n╔══════════════════════════════════════════════════════════════╗');
-console.log('║          WHATSAPP SERVICE - INICIALIZAÇÃO                    ║');
+console.log('\n');
+console.log('╔══════════════════════════════════════════════════════════════╗');
+console.log('║       WHATSAPP SERVICE - VERSÃO ANTI-CONFLITO                ║');
 console.log('╚══════════════════════════════════════════════════════════════╝');
-console.log('   ├─ NODE_ENV:', process.env.NODE_ENV || 'não definido');
 console.log('   ├─ AUTH_PATH:', AUTH_PATH);
-console.log('   ├─ Platform:', process.platform);
-console.log('   └─ PID:', process.pid);
+console.log('   ├─ MAX_RETRY:', MAX_RETRY_COUNT);
+console.log('   ├─ RECONNECT_DELAY:', RECONNECT_DELAY/1000, 'segundos');
+console.log('   ├─ CONFLICT_COOLDOWN:', CONFLICT_COOLDOWN/1000, 'segundos');
+console.log('   └─ Timestamp:', new Date().toISOString());
+console.log('\n');
 
 // ============================================
 // FUNÇÕES AUXILIARES
 // ============================================
 
-/**
- * Define callback para notificações
- */
 function setNotificationCallback(callback) {
     if (typeof callback === 'function') {
         notificationCallback = callback;
-        console.log('🔧 [CALLBACK] ✅ Callback de notificações configurado');
+        console.log('🔧 [CALLBACK] ✅ Notificações configuradas');
     }
 }
 
-/**
- * Envia notificação
- */
 function sendNotification(event, data = {}) {
     if (notificationCallback) {
         try {
             notificationCallback(event, { ...data, timestamp: new Date().toISOString() });
-            console.log(`🔔 [NOTIFY] Evento: ${event}`);
+            console.log(`🔔 [NOTIFY] ${event}`);
         } catch (error) {
             console.error('🔔 [NOTIFY] ❌ Erro:', error.message);
         }
     }
 }
 
-/**
- * Adiciona ao histórico de conexões
- */
 function addToHistory(event, details = {}) {
-    connectionState.connectionHistory.push({
+    const entry = {
         timestamp: new Date().toISOString(),
         event,
         details,
         memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-    });
-    
-    if (connectionState.connectionHistory.length > 50) {
+    };
+    connectionState.connectionHistory.push(entry);
+    if (connectionState.connectionHistory.length > 100) {
         connectionState.connectionHistory.shift();
     }
+    
+    // Log detalhado
+    console.log(`📝 [HISTORY] ${event}:`, JSON.stringify(details));
 }
 
-/**
- * Garante que a pasta de autenticação existe
- */
 function ensureAuthDirectory() {
     console.log('\n📁 [AUTH] Verificando diretório:', AUTH_PATH);
     
@@ -138,15 +127,26 @@ function ensureAuthDirectory() {
             console.log('   ├─ ✅ Diretório criado');
         }
         
-        // Verifica permissões
-        fs.accessSync(AUTH_PATH, fs.constants.R_OK | fs.constants.W_OK);
-        
         const files = fs.readdirSync(AUTH_PATH);
-        console.log('   ├─ Arquivos:', files.length);
+        const credFiles = files.filter(f => f.endsWith('.json'));
+        const hasCredsFile = files.includes('creds.json');
         
-        // Verifica se há credenciais válidas
-        const hasCredsFile = files.some(f => f.includes('creds'));
-        console.log('   ├─ Tem credenciais:', hasCredsFile ? 'Sim' : 'Não');
+        console.log('   ├─ Total arquivos:', files.length);
+        console.log('   ├─ Arquivos JSON:', credFiles.length);
+        console.log('   ├─ Tem creds.json:', hasCredsFile ? 'SIM ✅' : 'NÃO ❌');
+        
+        if (hasCredsFile) {
+            try {
+                const credsPath = path.join(AUTH_PATH, 'creds.json');
+                const credsContent = fs.readFileSync(credsPath, 'utf8');
+                const creds = JSON.parse(credsContent);
+                console.log('   ├─ Creds registrado:', creds.registered ? 'SIM' : 'NÃO');
+                console.log('   ├─ Creds me.id:', creds.me?.id || 'N/A');
+            } catch (e) {
+                console.log('   ├─ ⚠️ Erro ao ler creds.json:', e.message);
+            }
+        }
+        
         console.log('   └─ ✅ Diretório pronto');
         
         return { success: true, hasCredentials: hasCredsFile };
@@ -157,7 +157,7 @@ function ensureAuthDirectory() {
 }
 
 /**
- * Limpa credenciais corrompidas
+ * Limpa credenciais (versão segura)
  */
 function clearCredentials() {
     console.log('\n🗑️ [CLEAR] Limpando credenciais...');
@@ -165,12 +165,36 @@ function clearCredentials() {
     try {
         if (fs.existsSync(AUTH_PATH)) {
             const files = fs.readdirSync(AUTH_PATH);
+            let removed = 0;
+            let skipped = 0;
+            
             files.forEach(file => {
+                // Ignora diretórios e arquivos especiais
+                if (file === 'lost+found' || file.startsWith('.')) {
+                    console.log(`   ├─ [SKIP] ${file} (sistema)`);
+                    skipped++;
+                    return;
+                }
+                
                 const filePath = path.join(AUTH_PATH, file);
-                fs.unlinkSync(filePath);
-                console.log(`   ├─ Removido: ${file}`);
+                
+                try {
+                    const stats = fs.statSync(filePath);
+                    
+                    if (stats.isFile()) {
+                        fs.unlinkSync(filePath);
+                        console.log(`   ├─ [DEL] ${file}`);
+                        removed++;
+                    } else {
+                        console.log(`   ├─ [SKIP] ${file} (diretório)`);
+                        skipped++;
+                    }
+                } catch (err) {
+                    console.log(`   ├─ [ERR] ${file}: ${err.message}`);
+                }
             });
-            console.log('   └─ ✅ Credenciais removidas');
+            
+            console.log(`   └─ ✅ Removidos: ${removed}, Ignorados: ${skipped}`);
         }
         return true;
     } catch (error) {
@@ -179,9 +203,6 @@ function clearCredentials() {
     }
 }
 
-/**
- * Limpa socket existente
- */
 function cleanupSocket() {
     console.log('\n🧹 [CLEANUP] Limpando socket...');
     
@@ -191,8 +212,12 @@ function cleanupSocket() {
             sock.ev.removeAllListeners('creds.update');
             sock.ev.removeAllListeners('messages.upsert');
             
-            if (sock.ws && sock.ws.readyState === sock.ws.OPEN) {
-                sock.ws.close();
+            if (sock.ws) {
+                console.log('   ├─ WebSocket state:', sock.ws.readyState);
+                if (sock.ws.readyState === sock.ws.OPEN) {
+                    sock.ws.close();
+                    console.log('   ├─ WebSocket fechado');
+                }
             }
             
             console.log('   └─ ✅ Socket limpo');
@@ -206,9 +231,6 @@ function cleanupSocket() {
     }
 }
 
-/**
- * Reset completo do estado
- */
 function resetState() {
     connectionState.isConnected = false;
     connectionState.qrCode = null;
@@ -217,44 +239,44 @@ function resetState() {
 }
 
 // ============================================
-// FUNÇÃO PRINCIPAL DE INICIALIZAÇÃO
+// INICIALIZAÇÃO PRINCIPAL
 // ============================================
 
-/**
- * Inicializa a conexão com o WhatsApp
- * Usa locking para evitar múltiplas inicializações simultâneas
- */
 async function initialize(onMessage = null) {
-    // Se já há uma inicialização em andamento, aguarda
+    // Verifica cooldown de conflito
+    const timeSinceLastConflict = Date.now() - lastConflictTime;
+    if (lastConflictTime > 0 && timeSinceLastConflict < CONFLICT_COOLDOWN) {
+        const waitTime = Math.ceil((CONFLICT_COOLDOWN - timeSinceLastConflict) / 1000);
+        console.log(`\n⏳ [COOLDOWN] Aguardando ${waitTime}s após conflito anterior...`);
+        console.log('   └─ Motivo: Evitar rate limiting do WhatsApp');
+        
+        sendNotification('whatsapp:cooldown', { waitSeconds: waitTime });
+        
+        await sleep(CONFLICT_COOLDOWN - timeSinceLastConflict);
+    }
+    
+    // Lock para evitar inicializações simultâneas
     if (initializationLock && initializationPromise) {
-        console.log('\n⏳ [INIT] Inicialização já em andamento, aguardando...');
+        console.log('\n⏳ [INIT] Já há uma inicialização em andamento...');
         return initializationPromise;
     }
     
-    // Se já está conectado, retorna
     if (connectionState.isConnected && sock) {
         console.log('\n✅ [INIT] WhatsApp já está conectado');
         return sock;
     }
     
-    // Ativa o lock
     initializationLock = true;
-    
-    // Cria a promise de inicialização
     initializationPromise = _doInitialize(onMessage);
     
     try {
-        const result = await initializationPromise;
-        return result;
+        return await initializationPromise;
     } finally {
         initializationLock = false;
         initializationPromise = null;
     }
 }
 
-/**
- * Implementação real da inicialização
- */
 async function _doInitialize(onMessage) {
     connectionState.initializationAttempts++;
     
@@ -262,50 +284,51 @@ async function _doInitialize(onMessage) {
     console.log('╔══════════════════════════════════════════════════════════════╗');
     console.log('║          INICIANDO CONEXÃO COM WHATSAPP                      ║');
     console.log('╚══════════════════════════════════════════════════════════════╝');
-    console.log('   ├─ Tentativa #', connectionState.initializationAttempts);
+    console.log('   ├─ Tentativa:', connectionState.initializationAttempts);
+    console.log('   ├─ Conflitos anteriores:', connectionState.conflictCount);
+    console.log('   ├─ Retry count:', connectionState.retryCount);
     console.log('   ├─ Timestamp:', new Date().toISOString());
     console.log('   └─ Memory:', Math.round(process.memoryUsage().heapUsed / 1024 / 1024), 'MB');
     
-    addToHistory('init_start', { attempt: connectionState.initializationAttempts });
+    addToHistory('init_start', { 
+        attempt: connectionState.initializationAttempts,
+        conflictCount: connectionState.conflictCount
+    });
 
     try {
-        // Salva callback de mensagens
         if (onMessage) {
             messageCallback = onMessage;
         }
 
-        // Delay inicial para evitar race conditions no deploy
+        // Delay inicial maior para primeira tentativa
         if (connectionState.initializationAttempts === 1) {
-            console.log(`\n⏳ [INIT] Aguardando ${INIT_DELAY/1000}s antes de conectar...`);
+            console.log(`\n⏳ [INIT] Delay inicial de ${INIT_DELAY/1000}s...`);
             await sleep(INIT_DELAY);
         }
 
-        // Limpa socket anterior
         cleanupSocket();
         resetState();
 
-        // Verifica diretório de autenticação
         const authCheck = ensureAuthDirectory();
         if (!authCheck.success) {
-            throw new Error('Falha ao preparar diretório de autenticação');
+            throw new Error('Falha no diretório de autenticação');
         }
 
-        // Busca versão do Baileys
         console.log('\n📱 [BAILEYS] Buscando versão...');
         const { version, isLatest } = await fetchLatestBaileysVersion();
         console.log('   ├─ Versão:', version.join('.'));
-        console.log('   └─ É mais recente:', isLatest ? 'Sim ✅' : 'Não ⚠️');
+        console.log('   └─ Mais recente:', isLatest ? 'Sim ✅' : 'Não ⚠️');
 
-        // Carrega credenciais
         console.log('\n🔐 [AUTH] Carregando credenciais...');
         const authState = await useMultiFileAuthState(AUTH_PATH);
-        saveCreds = authState.saveCreds; // Salva referência global
+        saveCreds = authState.saveCreds;
         
-        console.log('   ├─ Credenciais carregadas:', !!authState.state.creds);
-        console.log('   ├─ Registrado:', authState.state.creds?.registered ? 'Sim' : 'Não');
-        console.log('   └─ Conta:', authState.state.creds?.me?.id || 'N/A');
+        console.log('   ├─ State existe:', !!authState.state);
+        console.log('   ├─ Creds existe:', !!authState.state.creds);
+        console.log('   ├─ Registrado:', authState.state.creds?.registered || false);
+        console.log('   ├─ Me.id:', authState.state.creds?.me?.id || 'N/A');
+        console.log('   └─ Keys exist:', !!authState.state.keys);
 
-        // Configurações do socket
         const socketConfig = {
             version,
             auth: {
@@ -316,32 +339,36 @@ async function _doInitialize(onMessage) {
                 ),
             },
             logger: pino({ level: 'silent' }),
-            browser: ['Bot Loja Automotiva', 'Chrome', '120.0.0'],
-            markOnlineOnConnect: true,
+            browser: ['AutoBot Loja', 'Chrome', '120.0.0'],
+            markOnlineOnConnect: false, // Mudado para false - pode ajudar
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
             connectTimeoutMs: CONNECTION_TIMEOUT,
             defaultQueryTimeoutMs: CONNECTION_TIMEOUT,
             keepAliveIntervalMs: 30000,
-            retryRequestDelayMs: 2000,
-            maxMsgRetryCount: 5,
+            retryRequestDelayMs: 5000, // Aumentado
+            maxMsgRetryCount: 3, // Reduzido
             qrTimeout: QR_TIMEOUT,
-            // IMPORTANTE: Evita conflitos
             printQRInTerminal: false,
             getMessage: async () => ({ conversation: '' }),
         };
 
         console.log('\n🔌 [SOCKET] Criando conexão...');
+        console.log('   ├─ Browser:', socketConfig.browser.join(' / '));
+        console.log('   ├─ connectTimeoutMs:', socketConfig.connectTimeoutMs);
+        console.log('   ├─ markOnlineOnConnect:', socketConfig.markOnlineOnConnect);
+        console.log('   └─ keepAliveIntervalMs:', socketConfig.keepAliveIntervalMs);
+        
         sock = makeWASocket(socketConfig);
         
-        // Configura handlers
         setupEventHandlers(sock, authState.saveCreds);
 
-        console.log('\n✅ [INIT] Aguardando conexão...\n');
+        console.log('\n✅ [INIT] Socket criado, aguardando eventos...\n');
         
         return sock;
     } catch (error) {
         console.error('\n❌ [INIT] ERRO:', error.message);
+        console.error('   Stack:', error.stack);
         connectionState.lastError = error.message;
         addToHistory('init_error', { error: error.message });
         throw error;
@@ -352,45 +379,69 @@ async function _doInitialize(onMessage) {
 // HANDLERS DE EVENTOS
 // ============================================
 
-/**
- * Configura handlers de eventos do socket
- */
 function setupEventHandlers(socket, saveCredsFunc) {
     console.log('📡 [EVENTS] Configurando handlers...');
 
     // ========== CONNECTION UPDATE ==========
     socket.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect, qr, isNewLogin, receivedPendingNotifications } = update;
         
-        console.log('\n┌─ CONNECTION UPDATE ─────────────────────────┐');
-        console.log('│ connection:', connection || '(none)');
+        const timestamp = new Date().toISOString();
+        
+        console.log('\n┌─────────────────────────────────────────────────────────┐');
+        console.log('│              CONNECTION UPDATE                          │');
+        console.log('├─────────────────────────────────────────────────────────┤');
+        console.log('│ Timestamp:', timestamp);
+        console.log('│ connection:', connection || '(undefined)');
         console.log('│ hasQR:', !!qr);
-        console.log('│ isConnected:', connectionState.isConnected);
-        console.log('└─────────────────────────────────────────────┘');
+        console.log('│ isNewLogin:', isNewLogin);
+        console.log('│ receivedPendingNotifications:', receivedPendingNotifications);
+        console.log('│ Estado atual:');
+        console.log('│   ├─ isConnected:', connectionState.isConnected);
+        console.log('│   ├─ retryCount:', connectionState.retryCount);
+        console.log('│   └─ conflictCount:', connectionState.conflictCount);
+        console.log('└─────────────────────────────────────────────────────────┘');
+
+        addToHistory('connection_update', { 
+            connection, 
+            hasQR: !!qr, 
+            isNewLogin,
+            hasLastDisconnect: !!lastDisconnect
+        });
 
         // ===== QR CODE =====
         if (qr) {
             connectionState.qrCode = qr;
+            connectionState.lastQRTime = Date.now();
             connectionState.isConnected = false;
             
             console.log('\n');
             console.log('╔═══════════════════════════════════════════════════════╗');
-            console.log('║     📱 ESCANEIE O QR CODE COM SEU WHATSAPP            ║');
+            console.log('║     📱 NOVO QR CODE - ESCANEIE COM SEU WHATSAPP       ║');
             console.log('╚═══════════════════════════════════════════════════════╝');
+            console.log('\n');
             qrcode.generate(qr, { small: true });
-            console.log('═══════════════════════════════════════════════════════');
-            console.log('   ⏰ Tempo limite: 60 segundos');
+            console.log('\n');
+            console.log('   ⚠️  IMPORTANTE:');
+            console.log('   1. Abra o WhatsApp no celular');
+            console.log('   2. Vá em Configurações > Dispositivos Vinculados');
+            console.log('   3. Toque em "Conectar um dispositivo"');
+            console.log('   4. Escaneie este QR Code');
+            console.log('   5. AGUARDE até aparecer "Conectado" (pode demorar 30-60s)');
+            console.log('   6. NÃO FECHE o WhatsApp durante a conexão!');
+            console.log('\n');
+            console.log(`   ⏰ QR expira em ${QR_TIMEOUT/1000} segundos`);
             console.log('═══════════════════════════════════════════════════════\n');
 
             sendNotification('whatsapp:qr', { qrCode: qr });
-            addToHistory('qr_generated');
+            addToHistory('qr_generated', { qrTimeout: QR_TIMEOUT });
         }
 
         // ===== CONECTADO =====
         if (connection === 'open') {
             console.log('\n');
             console.log('╔═══════════════════════════════════════════════════════╗');
-            console.log('║              ✅ CONECTADO COM SUCESSO!                ║');
+            console.log('║              ✅ CONEXÃO ABERTA!                       ║');
             console.log('╚═══════════════════════════════════════════════════════╝');
             
             connectionState.isConnected = true;
@@ -399,19 +450,35 @@ function setupEventHandlers(socket, saveCredsFunc) {
             connectionState.lastConnected = new Date().toISOString();
             connectionState.isReconnecting = false;
             connectionState.lastError = null;
+            // NÃO resetamos conflictCount aqui para manter histórico
             
             if (socket.user) {
                 connectionState.phoneNumber = socket.user.id.split(':')[0];
                 console.log('   ├─ Número:', connectionState.phoneNumber);
+                console.log('   ├─ JID:', socket.user.id);
                 console.log('   ├─ Nome:', socket.user.name || '(N/A)');
             }
-            console.log('   └─ Timestamp:', connectionState.lastConnected);
+            
+            console.log('   ├─ Timestamp:', connectionState.lastConnected);
+            console.log('   └─ Status: Aguardando estabilização...');
+            
+            // Aguarda 5 segundos para verificar se a conexão é estável
+            console.log('\n⏳ [STABILITY] Verificando estabilidade da conexão (5s)...');
+            
+            setTimeout(() => {
+                if (connectionState.isConnected) {
+                    console.log('✅ [STABILITY] Conexão estável!');
+                    logger.whatsappStatus('Conectado com sucesso! ✅');
+                    sendNotification('whatsapp:connected', {
+                        phoneNumber: connectionState.phoneNumber,
+                        lastConnected: connectionState.lastConnected,
+                        stable: true
+                    });
+                } else {
+                    console.log('⚠️ [STABILITY] Conexão instável - foi fechada');
+                }
+            }, 5000);
 
-            logger.whatsappStatus('Conectado com sucesso! ✅');
-            sendNotification('whatsapp:connected', {
-                phoneNumber: connectionState.phoneNumber,
-                lastConnected: connectionState.lastConnected
-            });
             addToHistory('connected', { phoneNumber: connectionState.phoneNumber });
         }
 
@@ -429,19 +496,27 @@ function setupEventHandlers(socket, saveCredsFunc) {
 
         // ===== CONECTANDO =====
         if (connection === 'connecting') {
-            console.log('🔄 [CONNECTION] Conectando...');
+            console.log('\n🔄 [CONNECTION] Estado: CONECTANDO...');
+            console.log('   └─ Aguarde, estabelecendo conexão com o servidor do WhatsApp');
             addToHistory('connecting');
         }
     });
 
     // ========== CREDENTIALS UPDATE ==========
     socket.ev.on('creds.update', async () => {
-        connectionState.credsUpdateCount++;
-        console.log(`🔐 [CREDS] Salvando credenciais (#${connectionState.credsUpdateCount})...`);
+        const count = ++connectionState.credsUpdateCount || 1;
+        connectionState.credsUpdateCount = count;
+        
+        // Só loga a cada 5 atualizações para reduzir spam
+        if (count <= 5 || count % 5 === 0) {
+            console.log(`🔐 [CREDS] Salvando credenciais (#${count})...`);
+        }
         
         try {
             await saveCredsFunc();
-            console.log('   └─ ✅ Credenciais salvas');
+            if (count <= 5 || count % 5 === 0) {
+                console.log('   └─ ✅ Salvo');
+            }
         } catch (error) {
             console.error('   └─ ❌ Erro ao salvar:', error.message);
         }
@@ -460,100 +535,104 @@ function setupEventHandlers(socket, saveCredsFunc) {
 }
 
 /**
- * Trata desconexão
+ * Trata desconexão com análise detalhada
  */
 async function handleDisconnect(lastDisconnect) {
     const statusCode = lastDisconnect?.error?.output?.statusCode;
     const errorMessage = lastDisconnect?.error?.message || 'Desconhecido';
     const errorData = lastDisconnect?.error?.data;
     
-    console.log('📊 [DISCONNECT] Análise:');
-    console.log('   ├─ Código:', statusCode);
+    console.log('\n📊 [DISCONNECT] Análise detalhada:');
+    console.log('   ├─ StatusCode:', statusCode);
     console.log('   ├─ Mensagem:', errorMessage);
     console.log('   ├─ Dados:', JSON.stringify(errorData || {}));
     
-    // Verifica se é conflict/device_removed
+    // Verifica se é conflito
     const isConflict = errorMessage.includes('conflict') || 
-                       errorData?.content?.some(c => c.tag === 'conflict');
+                       JSON.stringify(errorData || '').includes('conflict') ||
+                       JSON.stringify(errorData || '').includes('device_removed');
     
-    if (isConflict) {
-        console.log('   └─ ⚠️ CONFLITO DETECTADO (device_removed)');
-    }
+    const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+    const isBadSession = statusCode === DisconnectReason.badSession;
+    const isConnectionLost = statusCode === DisconnectReason.connectionLost || 
+                             statusCode === DisconnectReason.connectionClosed;
+    
+    console.log('   ├─ É conflito:', isConflict ? 'SIM ⚠️' : 'NÃO');
+    console.log('   ├─ É logout:', isLoggedOut ? 'SIM' : 'NÃO');
+    console.log('   ├─ É bad session:', isBadSession ? 'SIM' : 'NÃO');
+    console.log('   └─ É connection lost:', isConnectionLost ? 'SIM' : 'NÃO');
 
-    // Mapeia razões
-    const reasons = {
-        [DisconnectReason.loggedOut]: { text: 'Logout', reconnect: false, clearCreds: true },
-        [DisconnectReason.badSession]: { text: 'Sessão inválida', reconnect: false, clearCreds: true },
-        [DisconnectReason.connectionReplaced]: { text: 'Conectado em outro lugar', reconnect: false, clearCreds: true },
-        [DisconnectReason.connectionClosed]: { text: 'Conexão fechada', reconnect: true, clearCreds: false },
-        [DisconnectReason.connectionLost]: { text: 'Conexão perdida', reconnect: true, clearCreds: false },
-        [DisconnectReason.timedOut]: { text: 'Timeout', reconnect: true, clearCreds: false },
-        [DisconnectReason.restartRequired]: { text: 'Reinício necessário', reconnect: true, clearCreds: false },
-    };
-
-    const reason = reasons[statusCode] || { 
-        text: `Desconhecido (${statusCode})`, 
-        reconnect: !isConflict, // Não reconecta se for conflito
-        clearCreds: isConflict 
-    };
-
-    console.log('   ├─ Razão:', reason.text);
-    console.log('   ├─ Reconectar:', reason.reconnect);
-    console.log('   └─ Limpar credenciais:', reason.clearCreds);
+    addToHistory('disconnected', { 
+        statusCode, 
+        errorMessage, 
+        isConflict, 
+        isLoggedOut 
+    });
 
     sendNotification('whatsapp:disconnected', {
         statusCode,
-        reason: reason.text,
-        willReconnect: reason.reconnect
+        reason: errorMessage,
+        isConflict
     });
 
-    addToHistory('disconnected', { statusCode, reason: reason.text });
-
-    // Se precisa limpar credenciais (logout, conflito, etc)
-    if (reason.clearCreds || isConflict) {
-        console.log('\n🗑️ [LOGOUT] Removendo sessão...');
+    // ===== TRATAMENTO DE CONFLITO =====
+    if (isConflict || isLoggedOut || isBadSession) {
+        connectionState.conflictCount++;
+        lastConflictTime = Date.now();
+        
+        console.log('\n🚨 [CONFLICT] Conflito/Logout detectado!');
+        console.log('   ├─ Total de conflitos:', connectionState.conflictCount);
+        console.log('   ├─ Ação: Limpando credenciais');
+        console.log('   └─ Cooldown: ', CONFLICT_COOLDOWN/1000, 'segundos');
+        
         clearCredentials();
         
         sendNotification('whatsapp:logged_out', {
-            message: 'Sessão encerrada. Escaneie o QR Code novamente.'
+            message: 'Sessão encerrada. Aguarde o cooldown e escaneie novamente.',
+            conflictCount: connectionState.conflictCount,
+            cooldownSeconds: CONFLICT_COOLDOWN/1000
         });
         
-        // Aguarda e reinicia para novo QR
-        console.log('\n🔄 [RESTART] Gerando novo QR Code em 5s...');
+        // Se muitos conflitos, aumenta o cooldown
+        const extraCooldown = connectionState.conflictCount > 3 ? 60000 : 0;
+        const totalCooldown = CONFLICT_COOLDOWN + extraCooldown;
+        
+        console.log(`\n⏳ [COOLDOWN] Aguardando ${totalCooldown/1000}s antes de gerar novo QR...`);
+        
+        await sleep(totalCooldown);
+        
+        // Reset retry count para nova tentativa limpa
         connectionState.retryCount = 0;
-        
-        await sleep(5000);
-        
-        // Reinicia
         initializationLock = false;
+        
         await initialize(messageCallback);
         return;
     }
 
-    // Reconexão normal
-    if (reason.reconnect && connectionState.retryCount < MAX_RETRY_COUNT) {
+    // ===== RECONEXÃO NORMAL =====
+    if (isConnectionLost && connectionState.retryCount < MAX_RETRY_COUNT) {
         connectionState.retryCount++;
         
-        const delay = RECONNECT_BASE_DELAY * Math.pow(1.5, connectionState.retryCount - 1);
-        
         console.log(`\n🔄 [RECONNECT] Tentativa ${connectionState.retryCount}/${MAX_RETRY_COUNT}`);
-        console.log(`   └─ Aguardando ${Math.round(delay/1000)}s...`);
+        console.log(`   └─ Aguardando ${RECONNECT_DELAY/1000}s...`);
         
         sendNotification('whatsapp:reconnecting', {
             attempt: connectionState.retryCount,
             maxAttempts: MAX_RETRY_COUNT,
-            delayMs: delay
+            delaySeconds: RECONNECT_DELAY/1000
         });
 
-        await sleep(delay);
+        await sleep(RECONNECT_DELAY);
         
-        // Libera lock e reinicia
         initializationLock = false;
         await initialize(messageCallback);
     } else if (connectionState.retryCount >= MAX_RETRY_COUNT) {
         console.log('\n❌ [RECONNECT] Máximo de tentativas atingido');
+        console.log('   └─ Aguardando intervenção manual ou novo deploy');
+        
         sendNotification('whatsapp:connection_failed', {
-            message: 'Máximo de tentativas de reconexão atingido'
+            message: 'Máximo de tentativas atingido',
+            attempts: connectionState.retryCount
         });
     }
 }
@@ -572,7 +651,7 @@ async function handleIncomingMessage(msg) {
         
         if (!messageData.text) return;
 
-        console.log(`\n📩 [MSG] De: ${messageData.phone} | ${messageData.text.substring(0, 50)}...`);
+        console.log(`\n📩 [MSG IN] ${messageData.phone}: "${messageData.text.substring(0, 50)}..."`);
 
         logger.messageReceived(messageData.phone, messageData.text);
 
@@ -641,7 +720,7 @@ async function sendMessage(to, message) {
 
         const jid = to.includes('@') ? to : formatPhoneForWhatsApp(to);
 
-        if (settings.bot.typingDelay > 0) {
+        if (settings.bot?.typingDelay > 0) {
             await sock.sendPresenceUpdate('composing', jid);
             await sleep(settings.bot.typingDelay);
         }
@@ -649,7 +728,7 @@ async function sendMessage(to, message) {
         const result = await sock.sendMessage(jid, { text: message });
         await sock.sendPresenceUpdate('paused', jid);
 
-        console.log(`📤 [MSG] Para: ${extractPhoneFromJid(jid)} | ${message.substring(0, 50)}...`);
+        console.log(`📤 [MSG OUT] ${extractPhoneFromJid(jid)}: "${message.substring(0, 50)}..."`);
 
         logger.messageSent(extractPhoneFromJid(jid), message);
 
@@ -661,7 +740,7 @@ async function sendMessage(to, message) {
 
         return { success: true, messageId: result.key.id };
     } catch (error) {
-        console.error('❌ [MSG] Erro ao enviar:', error.message);
+        console.error('❌ [MSG OUT] Erro:', error.message);
         return { success: false, error: error.message };
     }
 }
@@ -671,7 +750,7 @@ async function sendMultipleMessages(to, messages) {
     for (const message of messages) {
         const result = await sendMessage(to, message);
         results.push(result);
-        if (settings.bot.messageDelay > 0) {
+        if (settings.bot?.messageDelay > 0) {
             await sleep(settings.bot.messageDelay);
         }
     }
@@ -685,9 +764,7 @@ async function sendImage(to, image, caption = '') {
         }
 
         const jid = to.includes('@') ? to : formatPhoneForWhatsApp(to);
-
         let imageBuffer = typeof image === 'string' ? fs.readFileSync(image) : image;
-
         const result = await sock.sendMessage(jid, { image: imageBuffer, caption });
 
         return { success: true, messageId: result.key.id };
@@ -735,7 +812,6 @@ async function sendLocation(to, location) {
         }
 
         const jid = to.includes('@') ? to : formatPhoneForWhatsApp(to);
-
         const result = await sock.sendMessage(jid, {
             location: {
                 degreesLatitude: location.latitude,
@@ -774,7 +850,7 @@ async function sendContact(to, contact, phone = null) {
 }
 
 // ============================================
-// FUNÇÕES AUXILIARES
+// FUNÇÕES AUXILIARES DE MENSAGEM
 // ============================================
 
 async function markAsRead(msg) {
@@ -849,7 +925,11 @@ async function getContactProfile(phone) {
 // ============================================
 
 function getConnectionState() {
-    return { ...connectionState, socketExists: sock !== null };
+    return { 
+        ...connectionState, 
+        socketExists: sock !== null,
+        lastConflictTime: lastConflictTime > 0 ? new Date(lastConflictTime).toISOString() : null
+    };
 }
 
 async function getConnectionStatus() {
@@ -860,11 +940,12 @@ async function getConnectionStatus() {
         lastConnected: connectionState.lastConnected,
         qrCode: connectionState.qrCode,
         retryCount: connectionState.retryCount,
+        conflictCount: connectionState.conflictCount,
         lastError: connectionState.lastError,
         uptime: connectionState.lastConnected 
             ? Date.now() - new Date(connectionState.lastConnected).getTime() 
             : null,
-        connectionHistory: connectionState.connectionHistory.slice(-10),
+        connectionHistory: connectionState.connectionHistory.slice(-20),
     };
 }
 
@@ -923,8 +1004,10 @@ async function logout() {
         clearCredentials();
         cleanupSocket();
         resetState();
+        connectionState.conflictCount = 0;
+        lastConflictTime = 0;
         
-        sendNotification('whatsapp:logged_out', { message: 'Sessão encerrada' });
+        sendNotification('whatsapp:logged_out', { message: 'Sessão encerrada manualmente' });
         console.log('   └─ ✅ Logout realizado');
     } catch (error) {
         console.error('❌ Erro no logout:', error.message);
@@ -942,7 +1025,7 @@ async function restart() {
     connectionState.retryCount = 0;
     initializationLock = false;
     
-    await sleep(2000);
+    await sleep(3000);
     await initialize(messageCallback);
 }
 
@@ -964,10 +1047,10 @@ async function getStats() {
         phoneNumber: connectionState.phoneNumber,
         lastConnected: connectionState.lastConnected,
         retryCount: connectionState.retryCount,
+        conflictCount: connectionState.conflictCount,
         initializationAttempts: connectionState.initializationAttempts,
         lastError: connectionState.lastError,
         memoryUsage: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-        credsUpdateCount: connectionState.credsUpdateCount,
         uptime: connectionState.lastConnected 
             ? Math.floor((Date.now() - new Date(connectionState.lastConnected).getTime()) / 1000)
             : 0,
@@ -1032,14 +1115,20 @@ async function getDiagnostics() {
             cpus: os.cpus().length,
             uptime: Math.round(os.uptime() / 60),
         },
-        connection: { ...connectionState, socketExists: sock !== null },
+        connection: { 
+            ...connectionState, 
+            socketExists: sock !== null,
+            lastConflictTime: lastConflictTime > 0 ? new Date(lastConflictTime).toISOString() : null
+        },
         auth: {
             pathExists: fs.existsSync(AUTH_PATH),
             files: fs.existsSync(AUTH_PATH) ? fs.readdirSync(AUTH_PATH) : [],
         },
-        locks: {
-            initializationLock,
-            hasInitPromise: !!initializationPromise,
+        config: {
+            maxRetryCount: MAX_RETRY_COUNT,
+            reconnectDelay: RECONNECT_DELAY,
+            conflictCooldown: CONFLICT_COOLDOWN,
+            qrTimeout: QR_TIMEOUT,
         }
     };
 }
@@ -1051,11 +1140,12 @@ async function updateMessageTemplate(id, data) { return true; }
 async function deleteMessageTemplate(id) { return true; }
 async function getConfig() {
     return {
-        typingDelay: settings.bot.typingDelay,
-        messageDelay: settings.bot.messageDelay,
+        typingDelay: settings.bot?.typingDelay || 0,
+        messageDelay: settings.bot?.messageDelay || 0,
         autoReconnect: true,
         maxRetries: MAX_RETRY_COUNT,
         authPath: AUTH_PATH,
+        conflictCooldown: CONFLICT_COOLDOWN,
     };
 }
 async function updateConfig(config) { }
